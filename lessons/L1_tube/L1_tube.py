@@ -59,11 +59,52 @@ h_min=min(rr[1]-rr[0],RI*2*np.pi/NT, zz[1]-zz[0]) #smallest element edge (mm)
 dt_est=h_min/c_wave  # stable time increment ~ h / c
 t_total=cfg.T_RAMP + cfg.T_HOLD
 
+# ---- write the Abaqus input file ----
+def lines(ids, per=16):
+    """Abaqus data lines take at most 16 integers: wrap a long list."""
+    return [", ".join(map(str, ids[i:i + per])) for i in range(0, len(ids), per)]
+
+
+def write_inp(path):
+    w = ["*HEADING", "L1: tube expanded by a cylinder. mm, tonne, s, N, MPa."]
+    # ---------------- model data: the tube ----------------
+    w += ["*NODE, NSET=TUBE_N"] + [f"{n}, {x:.6f}, {y:.6f}, {z:.6f}" for n, x, y, z in nodes]
+    w += ["*ELEMENT, TYPE=C3D8R, ELSET=TUBE"] + [f"{e + 1}, " + ", ".join(map(str, row)) for e, row in enumerate(elems)]
+    w += ["*NSET, NSET=ENDS"] + lines(ends)
+    w += ["*ELSET, ELSET=INNER"] + lines(inner_elems)
+    w += ["*SURFACE, TYPE=ELEMENT, NAME=TUBE_INNER", "INNER, S6"]
+    # ---------------- model data: the expander ----------------
+    w += ["*NODE, NSET=CYL_N"] + [f"{n}, {x:.6f}, {y:.6f}, {z:.6f}" for n, x, y, z in cnodes]
+    w += ["*ELEMENT, TYPE=SFM3D4R, ELSET=CYL_E"] + [f"{C0 + 50000 + e}, " + ", ".join(map(str, q)) for e, q in enumerate(cquads)]
+    w += ["*SURFACE SECTION, ELSET=CYL_E"]
+    w += ["*ELEMENT, TYPE=MASS, ELSET=CYL_MASS"] + [f"{C0 + 90000 + i}, {n[0]}" for i, n in enumerate(cnodes)]
+    w += ["*MASS, ELSET=CYL_MASS", f"{cfg.EXPANDER_NODE_MASS:g},"]
+    w += ["*SURFACE, TYPE=ELEMENT, NAME=CYL_SURF", "CYL_E, SPOS"]
+    # ---------------- model data: material, amplitude, contact property, supports ----------------
+    w += ["*MATERIAL, NAME=TISSUE", "*DENSITY", f"{rho:g},", "*HYPERELASTIC, NEO HOOKE", f"{C10:.6e}, {D1:.6e}"]
+    w += ["*SOLID SECTION, ELSET=TUBE, MATERIAL=TISSUE"]
+    w += ["*AMPLITUDE, NAME=RAMP, DEFINITION=SMOOTH STEP", f"0., 0., {cfg.T_RAMP:g}, 1."]
+    w += ["*SURFACE INTERACTION, NAME=CPROP", "*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=HARD"]
+    w += ["*BOUNDARY", "ENDS, 3, 3"]
+    # ---------------- history data: the step ----------------
+    w += ["*STEP, NAME=EXPAND", "*DYNAMIC, EXPLICIT", f", {t_total:g}", "*BOUNDARY, AMPLITUDE=RAMP"]
+    for n, x, y, z in cnodes:
+        r = np.hypot(x, y)
+        w += [f"{n}, 1, 1, {radial_move * x / r:.6f}", f"{n}, 2, 2, {radial_move * y / r:.6f}"]
+    w += ["*CONTACT", "*CONTACT INCLUSIONS", "CYL_SURF, TUBE_INNER", "*CONTACT PROPERTY ASSIGNMENT", ", , CPROP"]
+    w += ["*OUTPUT, FIELD, NUMBER INTERVAL=10", "*NODE OUTPUT", "U, RF"]
+    w += ["*OUTPUT, HISTORY, TIME INTERVAL=" + f"{t_total / 150:g}", "*ENERGY OUTPUT, ELSET=TUBE", "ALLKE, ALLIE, ALLAE"]
+    w += ["*END STEP"]
+    Path(path).write_text("\n".join(w) + "\n")
+
+
 if __name__ == "__main__":
     print(len(nodes), "tube nodes,", len(elems), "hexahedra,", len(inner_elems), "inner-face elements,", len(ends), "end nodes")
     print("outputs ->", OUT)
     print(f"expander: {len(cnodes)} nodes, {len(cquads)} quads, moves radially {radial_move:.1f} mm")
     print(f"neo-Hooke: mu {mu:.4f} MPa, K {K:.3f} MPa (K/mu = {K / mu:.1f}), C10 {C10:.4e}, D1 {D1:.4e}")
     print(f"wave speed {c_wave:.3e} mm/s, smallest edge {h_min:.2f} mm -> stable dt ~ {dt_est:.1e} s -> ~{t_total / dt_est:,.0f} increments for {t_total:g} s")
+    write_inp(OUT / "L1_tube.inp")
+    print("wrote", OUT / "L1_tube.inp", f"({(OUT / 'L1_tube.inp').stat().st_size / 1e3:.0f} kB)")
 
 
