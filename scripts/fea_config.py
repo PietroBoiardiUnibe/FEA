@@ -48,7 +48,7 @@ FRICTION=0.0 # frictionless contact not modeling the tangential pressure during 
 R_IN_NOMINAL=13.72  #leaflet attachment radius = lumen wall
 R_MID_NOMINAL=21.73 # outer skirt radius at its widest band in the 44 mm model
 DEVICE_SCALE_RULE= "s = R_device / R_MID_NOMINAL; lumen, leaflets, cuff and anchors scale by s (orifice area ~ s^2)"
-ANCHOR_STANDOFF=2.97 # arm to skirt (space for the captured native leaflet), nominal+
+ANCHOR_STANDOFF=2.97 # arm to skirt (space for the captured native leaflet), nominal
 ANCHOR_CLEARANCE=1.0 # TBD vs IB grid: minimum distance anchor to wall (mm)
 
 
@@ -57,6 +57,12 @@ MAX_KE_IE_PCT=5.0 # wall kinetic / internal energy at the end (must be Quasi-Sta
 MAX_ALLAE_PCT=5.0 #artificial energy / internal energy
 MAX_RING_SD=0.5 #  mm, out of roundness of the deployed deformed configuration in the model
 MIN_CONTACT_PCT=95.0 # share of the ring touching the device
+
+#sanity checks: a typo in a constant must fail at import,not later in pipeline
+assert R_MID_NOMINAL>R_IN_NOMINAL>0 , "device radii are inconsistent"
+assert 0<NU<0.5 and E_MPA>0 and DENSITY >0, "material parameters out of range"
+assert T_RAMP>0 and T_HOLD>=0 and DT_TARGET>0, "time settings out of range"
+assert SUPPORT_MODE in ("none","normal","normal_graded"),"unknown support mode"
 
 def check():
     "Print whether every input path exists indeed"
