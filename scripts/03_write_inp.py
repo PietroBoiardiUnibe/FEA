@@ -63,6 +63,22 @@ def lines(ids,per=16):
     ids=list(map(int,ids))
     return "\n".join(", ".join(map(str, ids[i:i + per])) for i in range(0, len(ids), per))
 
+def read_expander(path):
+    """expander of step 2: points=crimped start, "displacement" array = move to the final expanded and deployed shape mimicking self-expansion from catheter delivery"""
+    r=vtk.vtkXMLPolyDataReader(); r.SetFileName(str(path)); r.Update(); p=r.GetOutput()
+    E=vtk_to_numpy(p.GetPoints().GetData()).astype(float)
+    Q=vtk_to_numpy(p.GetPolys().GetConnectivityArray()).reshape(-1,4).astype(np.int64)
+    U=vtk_to_numpy(p.GetPointData().GetArray("displacement")).astype(float)
+    return E,Q,U
+
+def git_hash(folder):
+    """Short commit hash of a repository: written into every input file so a result can be traced to the code that made it."""
+    try:
+        return subprocess.run(["git", "-C", str(folder), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--id",default="SYN_0001")
@@ -84,6 +100,39 @@ def main():
     el_in,loc_in=boundary_faces(T,surf==1)
     print(f"wall: {len(T):,} tets ({n_flip:,} re-oriented), {len(X):,} corner -> {len(X10):,} nodes; "
           f"inner contact faces {len(el_in):,}; lid nodes {int(lid.sum()):,}")
+    # expander
+    E,Q,U=read_expander(run/"device"/"expander.vtp")
+    print(f"expander: {len(E):,} nodes, {len(Q):,} quads, radial move {np.linalg.norm(U, axis=1).min():.2f}..{np.linalg.norm(U, axis=1).max():.2f} mm")
+
+    #material as neo Hookean simple hyperelasticity (no HGO, Ogden or Mooney Rivlin)
+    mu=cfg.E_MPA/(2*(1+cfg.NU)) #shear modulus
+    K=cfg.E_MPA/(3*(1-2*cfg.NU)) #bulk modulus resistance to compression
+    C10,D1=mu/2.0,2.0/K
+    print(f"neo-Hookean material properties and coefficients: mu {mu:.4f} MPa, K {K:.3f} MPa, C10 {C10:.4e}, D1 {D1:.4e}")
+
+    #model data
+    w=[f"*HEADING\n{name}: device deployment (FEA repo {git_hash(cfg.SCRIPTS)}). mm, tonne, s, N, MPa.",
+         "*PREPRINT, ECHO=NO, MODEL=NO, HISTORY=NO, CONTACT=NO"]
+    w += ["*NODE, NSET=WALL_N", "\n".join(f"{i + 1}, {x:.6f}, {y:.6f}, {z:.6f}" for i, (x, y, z) in enumerate(X10))]
+    w += ["*ELEMENT, TYPE=C3D10M, ELSET=WALL", "\n".join(f"{i + 1}, " + ", ".join(map(str, row + 1)) for i, row in enumerate(T10))]
+    w += ["*NSET, NSET=LIDS", lines(np.flatnonzero(lid) + 1)]
+    for f in (1, 2, 3, 4):
+        if (loc_in == f).any():
+            w += [f"*ELSET, ELSET=INNER_S{f}", lines(el_in[loc_in == f] + 1)]
+    w += ["*SURFACE, TYPE=ELEMENT, NAME=WALL_INNER"] + [f"INNER_S{f}, S{f}" for f in (1, 2, 3, 4) if (loc_in == f).any()]
+    w += ["*NODE, NSET=EXP_N", "\n".join(f"{EXP_NODE0 + i + 1}, {x:.6f}, {y:.6f}, {z:.6f}" for i, (x, y, z) in enumerate(E))]
+    w += ["*ELEMENT, TYPE=SFM3D4R, ELSET=EXP_E", "\n".join(f"{EXP_ELEM0 + i + 1}, " + ", ".join(str(EXP_NODE0 + k + 1) for k in q) for i, q in enumerate(Q))]
+    w += ["*SURFACE SECTION, ELSET=EXP_E"]
+    w += ["*ELEMENT, TYPE=MASS, ELSET=EXP_MASS", "\n".join(f"{EXP_ELEM0 + 100_000 + i + 1}, {EXP_NODE0 + i + 1}" for i in range(len(E)))]
+    w += ["*MASS, ELSET=EXP_MASS", f"{cfg.EXPANDER_NODE_MASS:g},"]
+    w += ["*SURFACE, TYPE=ELEMENT, NAME=EXP_SURF", "EXP_E, SPOS"]
+    w += ["*MATERIAL, NAME=TISSUE", "*DENSITY", f"{cfg.DENSITY:g},", "*HYPERELASTIC, NEO HOOKE", f"{C10:.6e}, {D1:.6e}"]
+    w += ["*SOLID SECTION, ELSET=WALL, MATERIAL=TISSUE"]
+    print(f"model data so far: {len(w)} blocks")
+
+    
+
+
 
 if __name__=="__main__":
     main()
