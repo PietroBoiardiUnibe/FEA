@@ -11,7 +11,6 @@ Usage: python 03_write_inp.py --id SYN_0001 --level L3
 Writes: runs/<id>/deploy_<level>/<id>_<level>.inp and _info.json
 """
 import argparse
-from email.policy import default
 import json
 import subprocess
 import numpy as np
@@ -79,6 +78,48 @@ def git_hash(folder):
         return "unknown"
 
 
+def outer_support(X,T,T10,outer):
+    """
+    Tributary area and outward unit normal of every MIDSIDE node on the outer surface. A quadratic triangle carries a uniform pressure
+    on its midside nodes only (A/3 each, corners 0): the consistent nodal split. k_node = k_area * A_node.
+    """
+    el,loc=boundary_faces(T,outer)
+    area,nrm={},{}
+    for e,f in zip(el,loc):
+        a,b,c=FACES[f-1]; d=({0,1,2,3}-{a,b,c}).pop()
+        pa,pb,pc=X[T[e,a]],X[T[e,b]],X[T[e,c]]
+        n = np.cross(pb - pa, pc - pa); A = 0.5 * np.linalg.norm(n); n = n / np.linalg.norm(n)
+        if np.dot(n,(pa+pb+pc)/3-X[T[e,d]])<0:
+            n=-n  # outward = away from the tet's 4th corner
+        for u,v in ((a,b),(b,c),(c,a)):
+            m = T10[e, 4 + [i for i, (p, q) in enumerate(EDGES) if {p, q} == {u, v}][0]]
+            area[m] = area.get(m, 0.0) + A / 3.0; nrm[m] = nrm.get(m, 0.0) + n * A / 3.0
+    ids=np.array(sorted(area));A=np.array([area[i] for i in ids]); N=np.array([nrm[i] for i in ids])
+    return ids, A, N / np.linalg.norm(N, axis=1, keepdims=True)
+
+def grade(d,d_on,ramp):
+    """Smooth step 0->1 of the distance d from the TV ring: no support within d_on, full support beyond d_on + ramp """
+    t=np.clip((d-d_on)/ramp,0.0,1.0)
+    return t*t*(3-2*t)
+
+def support_blocks(X10,ids,A,N,weight,k_area,nbin=8):
+    """SPRINGA from each supported node to a fixed ground node GROUND_OFFSET mm outside of domain.,
+    along the normal (ABAQUS/EXPLICIT has no grounded SPRING1). Abaqus takes one stiffness per element set, so nodes are grouped in nbin classes of similar weighted area. """
+    keep=weight>1e-3
+    ids,A,N=ids[keep],(A*weight)[keep],N[keep]
+    cls=np.minimum((np.argsort(np.argsort(A))*nbin)//len(A),nbin-1)
+    G=X10[ids] +GROUND_OFFSET*N
+    w = ["*NODE, NSET=SPR_G"] + [f"{SPR_NODE0 + i + 1}, {g[0]:.6f}, {g[1]:.6f}, {g[2]:.6f}" for i, g in enumerate(G)]
+    for c in range(nbin):
+        sel = np.flatnonzero(cls == c)
+        w.append(f"*ELEMENT, TYPE=SPRINGA, ELSET=SUP{c}")
+        w.append("\n".join(f"{SPR_ELEM0 + int(i) + 1}, {int(ids[i]) + 1}, {SPR_NODE0 + int(i) + 1}" for i in sel))
+        w.append(f"*SPRING, ELSET=SUP{c}\n,\n{k_area * A[sel].mean():.6e}")
+    w.append("*BOUNDARY\nSPR_G, ENCASTRE")
+    return w, int(keep.sum()), float((k_area*A).sum())
+
+
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--id",default="SYN_0001")
@@ -128,9 +169,22 @@ def main():
     w += ["*SURFACE, TYPE=ELEMENT, NAME=EXP_SURF", "EXP_E, SPOS"]
     w += ["*MATERIAL, NAME=TISSUE", "*DENSITY", f"{cfg.DENSITY:g},", "*HYPERELASTIC, NEO HOOKE", f"{C10:.6e}, {D1:.6e}"]
     w += ["*SOLID SECTION, ELSET=WALL, MATERIAL=TISSUE"]
-    print(f"model data so far: {len(w)} blocks")
+    #graded outer support
+    n_spr,k_tot=0,0.0
 
-    
+    if cfg.SUPPORT_MODE!="none":
+        ids,A,N=outer_support(X,T,T10,surf==2)
+        weight=np.ones(len(ids))
+        if cfg.SUPPORT_MODE=="normal_graded":
+            d_ring=cKDTree(X[pd["tv_annulus"]==1]).query(X10[ids])[0] #distance of each outer node to the TV ring
+            weight=grade(d_ring,cfg.SUPPORT_D_ON,cfg.SUPPORT_RAMP)
+        blocks,n_spr,k_tot=support_blocks(X10,ids,A,N,weight,cfg.SUPPORT_K)
+        w+=blocks
+        print(f"support '{cfg.SUPPORT_MODE}': {len(ids):,} outer midside nodes, {n_spr:,} with a spring, total stiffness {k_tot:,.0f} N/mm")
+    n_total=len(X10)+len(E) + n_spr
+    print(f"nodes in the job: {n_total:,} (license cap {cfg.MAX_NODES:,})")
+    assert n_total<cfg.MAX_NODES, "above the license node cap: must use a coarser mesh level, remove unnecessary refinement"
+
 
 
 
