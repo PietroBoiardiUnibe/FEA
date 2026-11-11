@@ -118,6 +118,7 @@ def support_blocks(X10,ids,A,N,weight,k_area,nbin=8):
     w.append("*BOUNDARY\nSPR_G, ENCASTRE")
     return w, int(keep.sum()), float((k_area*A).sum())
 
+# not anymore model data, but rather the history of what happens to it
 
 
 def main():
@@ -185,6 +186,31 @@ def main():
     print(f"nodes in the job: {n_total:,} (license cap {cfg.MAX_NODES:,})")
     assert n_total<cfg.MAX_NODES, "above the license node cap: must use a coarser mesh level, remove unnecessary refinement"
 
+    #amplitude, contact property , fixed vessel lids as constraints
+    w+=["*AMPLITUDE, NAME=RAMP,DEFINITION=SMOOTH STEP",f"0.,0.,{cfg.T_RAMP:g}, 1."]
+    w+=["*SURFACE INTERACTION, NAME=CPROP","*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=HARD"]+([f"*FRICTION\n{cfg.FRICTION:g}"] if cfg.FRICTION > 0 else [])
+    w+=["*BOUNDARY","LIDS,ENCASTRE"]
+
+    #history data: the step
+    t_total=cfg.T_RAMP+cfg.T_HOLD
+    w+=["*STEP, NAME=DEPLOY", "*DYNAMIC, EXPLICIT", f", {t_total:g}",
+          f"*FIXED MASS SCALING, DT={cfg.DT_TARGET:g}, TYPE=BELOW MIN", "*BOUNDARY, AMPLITUDE=RAMP"]
+    w+=["\n".join(f"{EXP_NODE0+i+1}, {d+1}, {d+1}, {U[i,d]:.6f}" for i in range(len(E)) for d in range(3))]
+    w += ["*CONTACT", "*CONTACT INCLUSIONS", "EXP_SURF, WALL_INNER", "*CONTACT PROPERTY ASSIGNMENT", ", , CPROP"]
+    w += ["*OUTPUT, FIELD, NUMBER INTERVAL=30", "*NODE OUTPUT", "U, RF"]
+    w += ["*OUTPUT, HISTORY, TIME INTERVAL=" + f"{t_total / 150:g}", "*ENERGY OUTPUT", "ALLKE, ALLIE, ALLAE, ALLVD, ALLWK, ETOTAL",
+          "*ENERGY OUTPUT, ELSET=WALL", "ALLKE, ALLIE, ALLAE, ALLVD"]
+    w+=["*END STEP"]
+    (out / f"{name}.inp").write_text("\n".join(w) + "\n")
+
+    #what the post processing needs to know about input
+    info = {"id": a.id, "level": a.level, "name": name, "fea_repo": git_hash(cfg.SCRIPTS), "shape_repo": git_hash(cfg.SHAPE_SCRIPTS),
+            "n_corner_nodes": len(X), "n_nodes": len(X10), "n_tets": len(T), "n_lid_nodes": int(lid.sum()), "n_expander_nodes": len(E),
+            "n_springs": n_spr, "support": {"mode": cfg.SUPPORT_MODE, "k_area": cfg.SUPPORT_K, "d_on": cfg.SUPPORT_D_ON, "ramp": cfg.SUPPORT_RAMP, "total_N_per_mm": k_tot},
+            "material": {"model": "neo-Hookean", "E_MPa": cfg.E_MPA, "nu": cfg.NU, "C10": C10, "D1": D1, "assumed": True},
+            "time": {"ramp_s": cfg.T_RAMP, "hold_s": cfg.T_HOLD, "dt_target_s": cfg.DT_TARGET}, "friction": cfg.FRICTION, "expander_node0": EXP_NODE0}
+    (out / f"{name}_info.json").write_text(json.dumps(info, indent=1))
+    print(f"wrote {out / (name + '.inp')} ({(out / (name + '.inp')).stat().st_size / 1e6:.1f} MB)")
 
 
 
