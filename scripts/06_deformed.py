@@ -96,7 +96,7 @@ def seal_line(X_final,poly_deformed, plan, nbin=120):
             gap[j]=np.abs(sd[m]).min()
             touch=m & (np.abs(sd)<=0.3)       # the part of the device the tissue grips at this angle
             if touch.any():
-                 z_lo[j], z_hi[j] = ax[touch].min(), ax[touch].max()à
+                 z_lo[j], z_hi[j] = ax[touch].min(), ax[touch].max()
     return sd,gap,z_lo,z_hi
 
 def far_field(P0,P1,tv):
@@ -115,6 +115,76 @@ def far_field(P0,P1,tv):
         rows.append(dict(band_mm=[lo, hi], n=int(m.sum()), median_mm=float(np.median(u[m])), p95_mm=float(np.percentile(u[m], 95)), p95_drift_removed_mm=float(np.percentile(ur[m], 95))))
 
     return rows, float(np.degrees(np.arccos(np.clip((np.trace(R)-1)/2,-1,1)))),float(np.linalg.norm(cb-ca))
+
+
+def style(ax):
+    for s in ("top","right"):
+        ax.spines[s].set_visible(False)
+    for s in ("left","bottom"):
+        ax.spines[s].set_color(BASE)
+    ax.tick_params(colors=MUTED,labelsize=8,length=3)
+    ax.grid(axis="y",color=GRID,linewidth=0.6); ax.set_axisbelow(True)
+    ax.set_facecolor(SURFACE)
+
+def summary_figure(path, en, th, r0, r1, dev, out, rows, gap, z_lo, z_hi, plan, a):
+    plt.rcParams["font.family"] = ["Segoe UI", "DejaVu Sans"]
+    fig, axs = plt.subplots(2, 3, figsize=(15.5, 8.2), facecolor=SURFACE)
+    fig.suptitle(f"{a.id}  |  EVOQUE-like device {dev['size_mm']} mm deployed in the SSM-derived wall (mesh level {a.level})", x=0.012, ha="left", color=INK, fontsize=13, fontweight="bold")
+    deg = np.degrees(th) % 360; o = np.argsort(deg)
+
+    ax = axs[0, 0]; style(ax)                                              # A: the ring becomes circular
+    ax.plot(deg[o], r0[o], color=MUTED, lw=1.6, ls="--"); ax.plot(deg[o], r1[o], color=BLUE, lw=2)
+    ax.axhline(dev["expander_r_widest_mm"], color=ORANGE, lw=1.5)
+    ax.text(363, r0[o][-1], "before", color=INK2, fontsize=8.5, va="center"); ax.text(363, r1[o][-1] - 0.35, "after", color=INK2, fontsize=8.5, va="top")
+    ax.text(2, dev["expander_r_widest_mm"] + 0.35, f"device + leaflet layer {dev['expander_r_widest_mm']:.2f} mm", color=INK2, fontsize=8.5)
+    ax.set(xlim=(0, 360), xlabel="angle around the ring (deg)", ylabel="ring radius (mm)"); ax.set_xticks(range(0, 361, 90))
+    ax.set_title(f"The ring becomes circular\nout-of-roundness SD {out['ring_SD_before_mm']:.2f} to {out['ring_SD_after_mm']:.2f} mm", loc="left", color=INK, fontsize=10)
+
+    ax = axs[0, 1]; style(ax)                                              # B: quasi-static
+    t, ratio, ie = en["t"], en["ratio"], en["ie"]; ok = ie > 0.05 * ie.max()
+    ax.axvspan(0.1, t[-1], color=GRID, alpha=0.7, lw=0); ax.text(0.1 + 0.002, 0.93, "hold", color=INK2, fontsize=8.5, transform=ax.get_xaxis_transform())
+    ax.plot(t[ok], ratio[ok], color=BLUE, lw=2); ax.axhline(cfg.MAX_KE_IE_PCT, color=INK2, lw=1, ls="--")
+    ax.text(t[-1], cfg.MAX_KE_IE_PCT + 0.25, f"{cfg.MAX_KE_IE_PCT:g} % limit", color=INK2, fontsize=8.5, ha="right", va="bottom")
+    ax.set(xlim=(t[ok][0], t[-1]), ylim=(0, min(30, max(10, np.percentile(ratio[ok], 98) * 1.1))), xlabel="time (s)", ylabel="wall kinetic / internal energy (%)")
+    ax.set_title(f"Quasi-static: kinetic energy ends at {out['KE_over_IE_end_pct']:.1f} % of internal\nhourglass energy {out['hourglass_over_IE_pct']:.1f} %", loc="left", color=INK, fontsize=10)
+
+    ax = axs[0, 2]; style(ax)                                              # C: the deformation is local
+    x = np.arange(len(rows)); p95 = [r["p95_drift_removed_mm"] for r in rows]
+    ax.bar(x, p95, width=0.62, color=BLUE)
+    for xi, v in zip(x, p95):
+        ax.text(xi, max(v + 0.12, 0.62), f"{v:.1f}" if v >= 1 else f"{v:.2f}", ha="center", color=INK2, fontsize=8.5)
+    ax.axhline(0.5, color=INK2, lw=1, ls="--", zorder=1); ax.text(len(rows) - 0.45, 0.55, "0.5 mm", color=INK2, fontsize=8.5, ha="left", va="bottom")
+    ax.set_xlim(-0.6, len(rows) + 0.4)
+    ax.set_xticks(x); ax.set_xticklabels([f"{r['band_mm'][0]}-{r['band_mm'][1]}" if r["band_mm"][1] < 200 else f">{r['band_mm'][0]}" for r in rows])
+    ax.set(xlabel="distance from the TV ring (mm)", ylabel="95th percentile displacement (mm)")
+    ax.set_title(f"The deformation stays local\nwhole-heart drift {out['far_field_drift_deg']:.2f} deg / {out['far_field_drift_mm']:.2f} mm", loc="left", color=INK, fontsize=10)
+
+    ax = axs[1, 0]; style(ax)                                              # D: seal line gap per angle
+    ang = np.arange(len(gap)) * 360 / len(gap)
+    ax.plot(ang, gap, color=BLUE, lw=1.8); ax.axhline(0.3, color=INK2, lw=1, ls="--"); ax.text(358, 0.31, "0.3 mm", color=INK2, fontsize=8.5, ha="right", va="bottom")
+    ax.set(xlim=(0, 360), ylim=(0, max(0.5, np.nanmax(gap) * 1.25)), xlabel="angle around the device (deg)", ylabel="closest gap device-tissue (mm)"); ax.set_xticks(range(0, 361, 90))
+    ax.set_title(f"Closed seal line (the PVL criterion)\nworst angle {out['seal_worst_angle_gap_mm']:.2f} mm, {out['seal_angles_above_0p3mm']} of {out['seal_angles']} angles above 0.3 mm", loc="left", color=INK, fontsize=10)
+
+    ax = axs[1, 1]; style(ax)                                              # E: where does the tissue touch the device
+    ax.fill_between(ang, z_lo, z_hi, color=BLUE, alpha=0.35, lw=0, step="mid")
+    ring_deg = np.degrees(np.array(plan["ring"]["theta"])) % 360; ro = np.argsort(ring_deg)
+    ax.plot(ring_deg[ro], np.array(plan["ring"]["z"])[ro], color=INK2, lw=1.4, ls="--")
+    ax.text(363, np.array(plan["ring"]["z"])[ro][-1], "planned\nring", color=INK2, fontsize=8.5, va="center")
+    ax.set(xlim=(0, 360), xlabel="angle around the device (deg)", ylabel="axial height, + toward the ventricle (mm)"); ax.set_xticks(range(0, 361, 90))
+    ax.set_title(f"Where the tissue grips the device (gap at most 0.3 mm)\ncontact band {out['contact_band_mm'][0]:+.1f} to {out['contact_band_mm'][1]:+.1f} mm, median height {out['contact_band_median_height_mm']:.1f} mm", loc="left", color=INK, fontsize=10)
+
+    ax = axs[1, 2]; ax.axis("off")                                        # F: headline numbers
+    lines = [("Ring perimeter", f"{out['ring_perimeter_before_mm']:.1f} to {out['ring_perimeter_after_mm']:.1f} mm  ({out['ring_stretch_pct']:+.1f} %)"),
+             ("Blood-pool volume", f"{out['volume_before_ml']:.1f} to {out['volume_after_ml']:.1f} ml  ({out['volume_after_ml'] - out['volume_before_ml']:+.1f})"),
+             ("Largest displacement", f"{out['max_disp_mm']:.1f} mm"),
+             ("Device oversizing", f"{dev['oversizing_pct']:.1f} % (perimeter-derived diameter)"),
+             ("Penetration of tissue", f"{out['max_penetration_mm']:.2f} mm"),
+             ("Code", f"FEA {out['fea_repo']}, shape {out['shape_repo']}")]
+    for i, (k, v) in enumerate(lines):
+        y = 0.93 - i * 0.16
+        ax.text(0.0, y, k, color=INK2, fontsize=9, transform=ax.transAxes); ax.text(0.0, y - 0.06, v, color=INK, fontsize=12.5, fontweight="bold", transform=ax.transAxes)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(path, dpi=160, facecolor=SURFACE); plt.close(fig)
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -183,6 +253,11 @@ def main():
     out.update(far_field=rows,far_field_drift_deg=drift_deg,far_field_drift_mm=drift_mm)
     print("far field p95 (drift removed): " + ", ".join(f"{r['band_mm'][0]}-{r['band_mm'][1]} mm {r['p95_drift_removed_mm']:.2f}" for r in rows) + f" | drift {drift_deg:.2f} deg / {drift_mm:.2f} mm")
     (post / f"{name}_deployed.json").write_text(json.dumps(out, indent=1))
+
+    # the figure for the method and results chapters
+    summary_figure(post/f"{name}_summary.png",en,th,r0,r1,dev,out,rows,gap,z_lo,z_hi,plan,a)
+    print("figure->",post/f"{name}_summary.png")
+    
 
 if __name__=="__main__":
     main()
