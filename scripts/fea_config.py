@@ -24,8 +24,8 @@ MAX_NODES=250_000
 CPUS=4
 
 # FEA mesh (RULE)
-INNER_FACES={"L4":6000,"L3":12000,"L2":26000} 
-OUTER_EDGE={"L4":2.6,"L3":2.6,"L2":2.0} #outer surface edge length in mm
+INNER_FACES={"L5":2600,"L4":6000,"L3":12000,"L2":26000} 
+OUTER_EDGE={"L5":6.5,"L4":4.4,"L3":2.6,"L2":2.0} #outer surface edge length in mm
 WALL_THICKNESS=4.0
 OFFSET_SPACING=0.4 #mm voxel size of the distance field used to offset the surface
 OFFSET_SIGMA=0.8 #mm gaussian smoothing of the distance field

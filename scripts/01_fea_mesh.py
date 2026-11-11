@@ -103,7 +103,7 @@ def main():
     surface=np.zeros(len(X),np.int8) # 0 = inside the wall, 1 = inner (SSM) surface, 2 = outer surface
     surface[tree.query(P_out)[1]]=2
     surface[ssm_node]=1
-    assert (surface == 2).sum() > 1000 and (surface == 1).sum() == len(P), "surface labels inconsistent"
+    assert (surface==2).sum() >=0.9*len(P_out) and (surface==1).sum()== len(P), "surface labels inconsistent"
     point_data={"surface":surface}
     ssm_id=np.full(len(X),-1,np.int32)
     ssm_id[ssm_node]=np.arange(len(P))  # index of the coarse inner vertex that this node is
