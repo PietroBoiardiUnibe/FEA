@@ -186,15 +186,44 @@ def summary_figure(path, en, th, r0, r1, dev, out, rows, gap, z_lo, z_hi, plan, 
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(path, dpi=160, facecolor=SURFACE); plt.close(fig)
 
+
+def write_pvd(path, entries):
+    """ParaView collection file: a time series is a list of (time, file)"""
+    lines = ['<?xml version="1.0"?>', '<VTKFile type="Collection" version="0.1" byte_order="LittleEndian">', "  <Collection>"]
+    lines += [f'    <DataSet timestep="{t:.6f}" group="" part="0" file="{f}"/>' for t, f in entries]
+    path.write_text("\n".join(lines + ["  </Collection>", "</VTKFile>"]) + "\n")
+
+def series(folder,res,labels,mp,P0,heart,E,exp_polys,idx_exp,F0,polydata_from_arrays, times):
+    """One VTP per frame for the heart surface coloured by displacement magnitude and for the expander (coloured by the signed gap to the nearest tissue grid cell)"""
+    folder.mkdir(parents=True,exist_ok=True)
+    keep={n: vtk_to_numpy(heart.GetPointData().GetArray(n)) for n in ("chamber","patch","tv_annulus")}
+    heart_entries, exp_entries=[],[]
+    t0=time.time()
+
+    for k , t in enumerate(times):
+        Uk=surface_displacement(res["U"][k].astype(float), labels, mp["coarse_nodes"], mp["faces"], mp["tri"], mp["bary"])
+        magk=np.linalg.norm(Uk,axis=1)
+        write_polydata(folder / f"heart_{k:04d}.vtp", make_poly(P0+Uk, heart.GetPolys(), dict(keep, displacement_mm=magk)))
+        heart_entries.append((float(t),f"heart_{k:04d}.vtp"))
+        Xk = E + res["U"][k].astype(float)[idx_exp]
+        dist=vtk.vtkImplicitPolyDataDistance(); dist.SetInput(polydata_from_arrays(P0+Uk,F0))
+        gapk=np.array([dist.EvaluateFunction(p) for p in Xk])
+        write_polydata(folder/f"expander_{k:04d}.vtp", make_poly(Xk, exp_polys, dict(gap_mm=gapk)))
+        exp_entries.append((float(t), f"expander_{k:04d}.vtp"))
+        write_pvd(folder/"heart.pvd", heart_entries); write_pvd(folder / "expander.pvd", exp_entries)
+        print(f"ParaView series: {len(times)} frames in {time.time() - t0:.0f} s -> {folder}")
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--id",default="SYN_0001")
     ap.add_argument("--level",default="L3",choices=sorted(cfg.INNER_FACES))
     ap.add_argument("--no_series",action="store_true",help="skip the ParaView time series (slow part)")
+    ap.add_argument("--tag",default="",help="variant label of the run:deploy_<level>_<tag>")
     a=ap.parse_args()
     run=cfg.RUNS/a.id
-    name= f"{a.id}_{a.level}"
-    dep=run/f"deploy_{a.level}"
+    suffix=f"_{a.tag}" if a.tag else ""
+    name = f"{a.id}_{a.level}{suffix}"
+    dep = run / f"deploy_{a.level}{suffix}"
     post=dep/"post"; post.mkdir(parents=True, exist_ok=True)
 
     mesh_io = load_module("mesh_io", cfg.SHAPE_SCRIPTS)
@@ -257,7 +286,11 @@ def main():
     # the figure for the method and results chapters
     summary_figure(post/f"{name}_summary.png",en,th,r0,r1,dev,out,rows,gap,z_lo,z_hi,plan,a)
     print("figure->",post/f"{name}_summary.png")
-    
+
+    # ParaView time series for visualization
+    if not a.no_series:
+        series(post/"paraview",res,labels,mp,P0,heart,E,exp.GetPolys(),idx_exp,F0,polydata_from_arrays,times)
+    print("wrote", post)
 
 if __name__=="__main__":
     main()
