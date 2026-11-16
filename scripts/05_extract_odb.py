@@ -16,6 +16,20 @@ odb=openOdb(odb_path, readOnly=True)
 step=odb.steps[list(odb.steps.keys())[-1]]
 times, labels,U,RF=[],None,[],[]
 
+SENT=1e30 
+
+def contact_field(frame,prefix):
+    """(node labels, values) of a general contact output (CPRESS/COPEN) at the nodes Abaqus tracks"""
+    keys=[k for k in frame.fieldOutputs.keys() if k.startswith(prefix)]
+    if not keys:
+        return None,None
+    f=frame.fieldOutputs[keys[0]]
+    lab=np.concatenate([b.nodeLabels for b in f.bulkDataBlocks]); dat=np.concatenate([b.data for b in f.bulkDataBlocks]).ravel()
+    ok=np.abs(dat)<SENT
+    return lab[ok],dat[ok]
+
+cp_ever=set() # nodes that carried contact pressure in ANY frame (detachment = ever in contact but not at the end)
+
 for frame in step.frames:
     u=frame.fieldOutputs["U"]
     blocks=u.bulkDataBlocks # bulk access: the whole field as arrays, much faster than looping over values
@@ -29,16 +43,28 @@ for frame in step.frames:
         r=frame.fieldOutputs["RF"]
         rl=np.concatenate([b.nodeLabels for b in r.bulkDataBlocks]); rd = np.concatenate([b.data for b in r.bulkDataBlocks])
         RF.append(rd[np.argsort(rl)].astype(np.float32))
+        cl,cv=contact_field(frame,"CPRESS")
+        if cl is not None:
+            cp_ever.update(cl[cv>1e-6].tolist()); cp_last=(cl,cv)
+
 
 hist={}
 
 for region_name, region in step.historyRegions.items():
-    tag="wall_" if "WALL" in region_name.upper() else ""   # the energies of the WALL element set get a prefix, model-level ones keep the plain name
+    tag="wall_" if "WALL" in region_name.upper() else ("anc_" if "ANC_B" in region_name.upper() else "")  # the energies of the WALL element set get a prefix, model-level ones keep the plain name
     for key, out in region.historyOutputs.items():
         if key in ("ALLKE", "ALLIE", "ALLAE", "ALLVD", "ALLWK", "ETOTAL"):
             hist[tag+key]=np.array(out.data,dtype=float)
 
 result={"times":np.array(times),"labels":labels,"U":np.stack(U)}
+
+if cp_ever or "cp_last" in globals():
+    result["cpress_ever_labels"]=np.array(sorted(cp_ever),dtype=np.int64)
+    result["cpress_last_labels"],result["cpress_last"]=cp_last[0],cp_last[1].astype(np.float32)
+    ol,ov=contact_field(step.frames[-1],"COPEN")
+    if ol is not None:
+        result["copen_last_labels"],result["copen_last"]=ol,ov.astype(np.float32)
+
 if RF:
     result["RF"] = np.stack(RF)
 for k, v in hist.items():

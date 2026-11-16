@@ -15,6 +15,7 @@ import importlib.util
 import json
 import sys
 import time
+import fea_common as fc
 from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
@@ -77,6 +78,8 @@ def ring_of(P,F,plan,tv,b07,polydata_from_arrays):
     fr=plan["frame"]; ann= {k: np.array(fr[k]) for k in ("centre", "normal", "e1", "e2")}
     th=np.array(plan["ring"]["theta"])
     r,z,X=b07.ring(tree,dict(ann,band=P[tv]),th,8)
+    if not np.isfinite(r).all():
+        raise RuntimeError(f"{np.isnan(r).sum()} ring rays missed the wall (VTK {vtk.vtkVersion.GetVTKVersion()}); use the shapeworks env")
     return th,r,z,X
 
 def seal_line(X_final,poly_deformed, plan, nbin=120):
@@ -232,8 +235,10 @@ def main():
     res = np.load(dep / f"{name}_results.npz"); info = json.loads((dep / f"{name}_info.json").read_text())
     mp=np.load(run/"mesh"/f"{a.id}_wall_{a.level}_map.npz")
     plan = json.loads((cfg.PLANS / f"{a.id}_plan.json").read_text())
-    dev = json.loads((run / "device" / "device.json").read_text())
+    cuff_file=Path(info.get("device",run/"device"/"expander.vtp")) # the cuff this run was written with (pilot: device/expander.vtp)
+    dev=json.loads((cuff_file.parent / ("device_full.json" if cuff_file.parent.name == "device_full" else "device.json")).read_text())
     heart=read_polydata(cfg.HEARTS/f"{a.id}_RH.vtp")
+    plan=fc.axis_plan(plan,info.get("axis_offset_e1e2_mm"))  # ring, seal line and angles about the CUFF axis, not the raw 07b centre
     P0 = vtk_to_numpy(heart.GetPoints().GetData()).astype(float)
     F0 = vtk_to_numpy(heart.GetPolys().GetConnectivityArray()).reshape(-1, 3)
     tv = vtk_to_numpy(heart.GetPointData().GetArray("tv_annulus")) == 1
@@ -266,7 +271,7 @@ def main():
           f"perimeter {out['ring_perimeter_before_mm']:.1f} -> {out['ring_perimeter_after_mm']:.1f} mm ({out['ring_stretch_pct']:+.1f} %)")
 
     # find out if there is a closed contact line around device once expanded to verify absence of major PVL
-    exp=read_polydata(run/"device"/"expander.vtp")
+    exp=read_polydata(cuff_file)
     E=vtk_to_numpy(exp.GetPoints().GetData()).astype(float)
     idx_exp=np.searchsorted(labels,info["expander_node0"]+1+np.arange(len(E)))
     X_final=E+res["U"][-1].astype(float)[idx_exp]

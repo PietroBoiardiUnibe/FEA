@@ -24,8 +24,10 @@ MAX_NODES=250_000
 CPUS=4
 
 # FEA mesh (RULE)
-INNER_FACES={"L5":2600,"L4":6000,"L3":12000,"L2":26000} 
-OUTER_EDGE={"L5":6.5,"L4":4.4,"L3":2.6,"L2":2.0} #outer surface edge length in mm
+INNER_FACES={"L5":2600,"L4":6000,"L3":12000,"L2":26000,"L1":26000} 
+OUTER_EDGE={"L5":6.5,"L4":4.4,"L3":2.6,"L2":2.0,"L1":2.0} #outer surface edge length in mm
+ZONE_MM=15.0 #close to device where local refinement and sizing of mesh grid elements can be employed to get finest computational discretization of domain
+REFINE_ZONE={"L1":1.5} # L1 = L2 + LOCAL refinement: surface edges / 1.5 inside the device zone (3D ratio ~1.33 there to be correct and consistent when analyzing the GCI
 WALL_THICKNESS=4.0
 OFFSET_SPACING=0.4 #mm voxel size of the distance field used to offset the surface
 OFFSET_SIGMA=0.8 #mm gaussian smoothing of the distance field
@@ -71,6 +73,22 @@ MAX_KE_IE_PCT=5.0 # wall kinetic / internal energy at the end (must be Quasi-Sta
 MAX_ALLAE_PCT=5.0 #artificial energy / internal energy
 MAX_RING_SD=0.5 #  mm, out of roundness of the deployed deformed configuration in the model
 MIN_CONTACT_PCT=95.0 # share of the ring touching the device
+
+#full device (RULE, calibrated on SYN001 from SSM N=94)
+LANDING_CLEARANCE=1.75 # c(mm) accounts for th emost intr-annular possible landing with the configured anatomy
+# so that every anchor at /below deformed annulus (On L3 mesh, the sweep was on 1/1.75/2.5)
+START_CLEAR=0.5 #mm: the started (shifted) anchors sit at least this far inside the blood pool
+ANCHOR_ELEM=0.5 # mm: beam element length = anchor surface edge length
+CUFF_START_GAP=0.3 #mm the crimped cuff starts at least this far inside every anchor arm (anchor cuff contact shall be modelled)
+ANCHOR_E_EFF=319.8 # MPa : circular section r 1.2 s with the bending stiffness EI of a nitinol strut 0.5 x 1.0 mm of (E=50 GPa), so EI=521 N mm2
+ANCHOR_NU=0.33 #Nitinol Poisson Ratio (far from incompressibility)
+NITI_DENSITY=6.45e-9 # t/mm3 (6.45 g/cm3)
+ANCHOR_ALPHA=50.0 # 1/s mass-proportional damping (NUMERICAL: zeta ~10 % at the ~40 Hz mass-scaled cantilever mode; dissipates 2e-4 of the external work)
+CUFF_WALL_CONTACT="bonded" #"bonded"= hard + NO SEPARATION + ROUGH (Explicit general contact demands ROUGH with No Separation) | "hard" = hard + separation allowed (+ Coulomb --friction)
+AXIS_RULE="centroid" # cuff axis through the centroid of the area enclosed by the TV annulus contour | "perimeter" | "mec" (07b centre)
+# mimics clinical practice as in CT based pre-procedural planning of delivery and landing of the transcatheter device
+assert CUFF_WALL_CONTACT in ("bonded","hard") and LANDING_CLEARANCE>=0, "full-device settings are out of range"
+assert AXIS_RULE in ("centroid","perimeter","mec"), "unknown axis deployment rule"
 
 #sanity checks: a typo in a constant must fail at import,not later in pipeline
 assert R_MID_NOMINAL>R_IN_NOMINAL>0 , "device radii are inconsistent"

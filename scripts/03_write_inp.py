@@ -21,6 +21,11 @@ import fea_config as cfg
 
 EXP_NODE0,EXP_ELEM0=2_000_000, 5_000_000 # expander ids: nodes from 2,000,001, quads from 5,000,001 , masses from 5,100,001
 SPR_NODE0,SPR_ELEM0=3_000_000,6_000_000 #ground nodes and spring elements of the graded normal only support to dampen far field deformation
+ANC_N0,ANC_E0=2_200_000, 5_300_000 #compliant anchors that can bend under loading conditions:beam nodes from 2,200,001, B31 
+BALL_N0,BALL_E0=2_300_000,5_400_000 # rigid ball tips: surface nodes from 2.300,001, SFM3D3 from 5,400,001, ball mass/rotary inertia from 5,490,001
+SKIN_N0,SKIN_E0, SKIN_M0=2_400_000,5_500_000,5_600_000 # arm contact skin: ring nodes from 2,400,001, SFM3D4R from 5,500,001, nodal masses from 5,600,001
+SKIN_NR=12 #nodes per skin ring
+SKIN_NODE_MASS=1e-9 # t per skin node: penalty contact needs a nodal mass, transferred to the beam node by the coupling
 GROUND_OFFSET=10.0 ## mm: ground nodes sit this far outside the wall along outward normal
 FACES=((0,1,2),(0,3,1),(1,3,2),(2,3,0))  # Abaqus tet faces S1..S4 (0-based corner indices)
 EDGES=((0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3))  # C3D10 mid-side nodes 5..10 = edges 1-2, 2-3, 3-1, 1-4, 2-4, 3-4
@@ -118,17 +123,85 @@ def support_blocks(X10,ids,A,N,weight,k_area,nbin=8):
     w.append("*BOUNDARY\nSPR_G, ENCASTRE")
     return w, int(keep.sum()), float((k_area*A).sum())
 
-# not anymore model data, but rather the history of what happens to it
+def anchor_blocks(AB):
+    """Compliant anchors deform under bending in FEA: per anchor a B31 beam along the deployed centre line, started shifted radially inward by ONE common shift,
+    and a rigid ball (SFM3D3 surface, *RIGID BODY on the tip node) with the mass and rotary inertia of a solid nitinol sphere.
+    (without them the tip reference node has ~no rotary inertia and Explicit stops on 'excessive rotation').
+    Root Node: radial translation back to the deployed position (prescribed in the step), rotations fixed (clamped to the cap).
+    Returns keyword lines, root boundary conditions [(node, displacement)], number of nodes """
+    nA,shift=int(AB["n"]),float(AB["shift"])
+    w,bc,nid,eid,bnid,beid=[],[],ANC_N0,ANC_E0,BALL_N0,BALL_E0
+    rb=float(AB["ball_r"]); mb=cfg.NITI_DENSITY*4/3*np.pi*rb**3; Ib=0.4*mb*rb**2
+    snid,seid,skin_arm=SKIN_N0,SKIN_E0,[]
+    for k in range(nA):
+        er,et=AB[f"er{k}"],AB[f"et{k}"]; C=AB[f"C{k}"]-shift*er; B=AB[f"B{k}"]-shift*er
+        ids=np.arange(nid+1,nid+1+len(C)); nid+=len(C)
+        w+=[f"*NODE,NSET=ANC{k}_N","\n".join(f"{i}, {x:.6f}, {y:.6f}, {z:.6f}" for i,(x,y,z) in zip(ids,C))]
+        w+=[f"*ELEMENT, TYPE=B31, ELSET=ANC{k}_B","\n".join(f"{eid+j+1}, {ids[j]}, {ids[j+1]}" for j in range(len(C)-1))]
+        eid+=len(C)-1
+        w+=[f"*BEAM SECTION, SECTION=CIRC, ELSET=ANC{k}_B, MATERIAL=NITI_EQ",f"{float(AB['arm_r']):.4f}",f"{et[0]:.6f}, {et[1]:.6f}, {et[2]:.6f}"]  # radius; n1 = tangential
+        bids=np.arange(bnid+1,bnid+1+len(B)); bnid+=len(B)
+        w+=[f"*NODE, NSET=BALL{k}_N","\n".join(f"{i}, {x:.6f}, {y:.6f}, {z:.6f}" for i,(x,y,z) in zip(bids,B))]
+        w+=[f"*ELEMENT, TYPE=SFM3D3, ELSET=BALL{k}_E","\n".join(f"{beid+j+1}, "+", ".join(str(bids[v]) for v in f) for j,f in enumerate(AB["ball_faces"]))]
+        beid+=len(AB["ball_faces"])
+        w+=[f"*SURFACE SECTION, ELSET=BALL{k}_E",f"*RIGID BODY, REF NODE={ids[-1]}, ELSET=BALL{k}_E"]  # the ball follows the tip node
+        w+=[f"*ELEMENT, TYPE=MASS, ELSET=BALLM{k}",f"{BALL_E0+90_000+2*k+1}, {ids[-1]}",f"*MASS, ELSET=BALLM{k}",f"{mb:.4e},"]
+        w+=[f"*ELEMENT, TYPE=ROTARYI, ELSET=BALLI{k}",f"{BALL_E0+90_000+2*k+2}, {ids[-1]}",f"*ROTARY INERTIA, ELSET=BALLI{k}",f"{Ib:.4e}, {Ib:.4e}, {Ib:.4e}"]
+        bc.append((int(ids[0]),shift*er))
+        #CONTACT SKIN: Abaqus/Explicit caps the general contact radius of a beam at 0.6 x its element length,
+        # so the true arm tube r_arm is given as a massless geometry tube of SFM3D4R faces whose rings are KINEMATICALLY COUPLED to the beam nodes: the beam carried the bending stiffness, the skin carries the contact geometry
+        T=np.gradient(C,axis=0); T/=np.linalg.norm(T,axis=1,keepdims=True)
+        ring=[j for j in range(len(C)) if np.linalg.norm(C[j]-C[-1])> rb-0.3]
+        phi=np.linspace(0,2*np.pi,SKIN_NR,endpoint=False)
+        rid={}
+        for j in ring:
+            b=np.cross(T[j],et); P=C[j]+float(AB["arm_r"])*(np.cos(phi)[:,None]*et+np.sin(phi)[:,None]*b)
+            rid[j]=np.arange(snid+1,snid+1+SKIN_NR); snid+=SKIN_NR
+            w+=[f"*NODE, NSET=SKIN{k}_{j}","\n".join(f"{i}, {x:.6f}, {y:.6f}, {z:.6f}" for i,(x,y,z) in zip(rid[j],P))]
+            w+=[f"*SURFACE,TYPE=NODE,NAME=SKINS{k}_{j}",f"SKIN{k}_{j},",      # the ring follows the beam node's rigid motion (Explicit: *COUPLING + *KINEMATIC)
+                f"*COUPLING, CONSTRAINT NAME=CPL{k}_{j}, REF NODE={ids[j]}, SURFACE=SKINS{k}_{j}","*KINEMATIC","1, 3"]
+        for j in ring:
+            if j+1 in rid:
+                q=[(rid[j][i],rid[j][(i+1)%SKIN_NR],rid[j+1][(i+1)%SKIN_NR],rid[j+1][i]) for i in range(SKIN_NR)]
+                ids_q=np.arange(seid+1,seid+1+len(q)); seid+=len(q)
+                w+=["*ELEMENT, TYPE=SFM3D4R, ELSET=SKIN_E","\n".join(f"{e}, {a_}, {b_}, {c_}, {d_}" for e,(a_,b_,c_,d_) in zip(ids_q,q))]
+                if AB["cuff_mask"][k][j]: skin_arm+=list(ids_q)
 
+    w+=["*SURFACE SECTION, ELSET=SKIN_E","*ELSET, ELSET=SKIN_ARM",lines(skin_arm)]
+    w+=["*NSET, NSET=SKIN_N, GENERATE",f"{SKIN_N0+1}, {snid}, 1","*ELEMENT, TYPE=MASS, ELSET=SKIN_MASS"]
+    w+=["\n".join(f"{SKIN_M0+i}, {SKIN_N0+i}" for i in range(1,snid-SKIN_N0+1)),"*MASS, ELSET=SKIN_MASS",f"{SKIN_NODE_MASS:g},"]  # penalty contact needs nodal mass
+    w+=["*ELSET, ELSET=ANC_B"]+[", ".join(f"ANC{k}_B" for k in range(nA))]
+    w+=["*ELSET, ELSET=BALL_E"]+[", ".join(f"BALL{k}_E" for k in range(nA))]
+    w+=["*SURFACE, TYPE=ELEMENT, NAME=SKIN_SURF","SKIN_E, SPOS","*SURFACE, TYPE=ELEMENT, NAME=SKINARM_SURF","SKIN_ARM, SPOS",
+        "*SURFACE, TYPE=ELEMENT, NAME=BALL_SURF","BALL_E, SPOS"]
+    w+=["*MATERIAL, NAME=NITI_EQ","*DENSITY",f"{cfg.NITI_DENSITY:g},","*ELASTIC",f"{cfg.ANCHOR_E_EFF:g}, {cfg.ANCHOR_NU:g}",f"*DAMPING, ALPHA={cfg.ANCHOR_ALPHA:g}"]
+    return w,bc,(nid-ANC_N0)+(bnid-BALL_N0)+ (snid-SKIN_N0)
+
+
+
+
+# not anymore model data, but rather the history of what happens to it
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--id",default="SYN_0001")
     ap.add_argument("--level",default="L3",choices=sorted(cfg.INNER_FACES))
+    ap.add_argument("--friction",type=float,default=cfg.FRICTION,help="Coulomb friction coefficient (0 = frictionless, the default)")
+    ap.add_argument("--ramp",type=float,default=cfg.T_RAMP,help="smooth-step ramp duration in s (rate-sensitivity runs)")
+    ap.add_argument("--tag",default="",help="variant label: deploy_<level>_<tag>")
+    ap.add_argument("--full",action="store_true",help="full device of 02b:device_full/cuff.vtp + compliant anchors (default: pilot cuff only, device/expander.vtp)")
+    ap.add_argument("--contact", default=cfg.CUFF_WALL_CONTACT,choices=("bonded","hard"), help="cuff-wall contact: bonded (no separation + rough) or hard (separation allowed, Coulomb --friction); anchors: always hard")
+    ap.add_argument("--device_dir",default="device",help="cuff-only runs: runs/<id>/<device_dir>/expander.vtp (e.g. device_mec)")
     a=ap.parse_args()
+    assert a.friction>=0, "friction coefficient must be >=0 (it applies to every non-bonded contact: anchors always, skirt-wall only when --contact hard)"
+    
     run=cfg.RUNS/a.id
-    name=f"{a.id}_{a.level}"
-    out=run/f"deploy_{a.level}"
+    device=run/"device_full"/"cuff.vtp" if a.full else run/a.device_dir/"expander.vtp"
+    dev_rec=json.loads((device.parent/("device_full.json" if a.full else "device.json")).read_text())   # the device record: size, axis rule, axis offset
+    anchors=run/"device_full"/"anchors_beam.npz" if a.full else None
+    suffix=f"_{a.tag}" if a.tag else ""
+    name=f"{a.id}_{a.level}{suffix}"
+    out=run/f"deploy_{a.level}{suffix}"
     out.mkdir(parents=True,exist_ok=True)
 
     # wall
@@ -143,7 +216,7 @@ def main():
     print(f"wall: {len(T):,} tets ({n_flip:,} re-oriented), {len(X):,} corner -> {len(X10):,} nodes; "
           f"inner contact faces {len(el_in):,}; lid nodes {int(lid.sum()):,}")
     # expander
-    E,Q,U=read_expander(run/"device"/"expander.vtp")
+    E,Q,U=read_expander(device)
     print(f"expander: {len(E):,} nodes, {len(Q):,} quads, radial move {np.linalg.norm(U, axis=1).min():.2f}..{np.linalg.norm(U, axis=1).max():.2f} mm")
 
     #material as neo Hookean simple hyperelasticity (no HGO, Ogden or Mooney Rivlin)
@@ -168,6 +241,12 @@ def main():
     w += ["*ELEMENT, TYPE=MASS, ELSET=EXP_MASS", "\n".join(f"{EXP_ELEM0 + 100_000 + i + 1}, {EXP_NODE0 + i + 1}" for i in range(len(E)))]
     w += ["*MASS, ELSET=EXP_MASS", f"{cfg.EXPANDER_NODE_MASS:g},"]
     w += ["*SURFACE, TYPE=ELEMENT, NAME=EXP_SURF", "EXP_E, SPOS"]
+    root_bc,n_anc=[],0
+    if anchors:
+        blocks,root_bc,n_anc=anchor_blocks(np.load(anchors))
+        w+=blocks
+        print(f"compliant anchors: {len(root_bc)} B31 beams + rigid balls, E_eff {cfg.ANCHOR_E_EFF:g} MPa, alpha {cfg.ANCHOR_ALPHA:g}/s, {n_anc:,} nodes")
+
     w += ["*MATERIAL, NAME=TISSUE", "*DENSITY", f"{cfg.DENSITY:g},", "*HYPERELASTIC, NEO HOOKE", f"{C10:.6e}, {D1:.6e}"]
     w += ["*SOLID SECTION, ELSET=WALL, MATERIAL=TISSUE"]
     #graded outer support
@@ -182,24 +261,30 @@ def main():
         blocks,n_spr,k_tot=support_blocks(X10,ids,A,N,weight,cfg.SUPPORT_K)
         w+=blocks
         print(f"support '{cfg.SUPPORT_MODE}': {len(ids):,} outer midside nodes, {n_spr:,} with a spring, total stiffness {k_tot:,.0f} N/mm")
-    n_total=len(X10)+len(E) + n_spr
+    n_total=len(X10)+len(E) + n_spr +n_anc
     print(f"nodes in the job: {n_total:,} (license cap {cfg.MAX_NODES:,})")
     assert n_total<cfg.MAX_NODES, "above the license node cap: must use a coarser mesh level, remove unnecessary refinement"
 
     #amplitude, contact property , fixed vessel lids as constraints
-    w+=["*AMPLITUDE, NAME=RAMP,DEFINITION=SMOOTH STEP",f"0.,0.,{cfg.T_RAMP:g}, 1."]
-    w+=["*SURFACE INTERACTION, NAME=CPROP","*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=HARD"]+([f"*FRICTION\n{cfg.FRICTION:g}"] if cfg.FRICTION > 0 else [])
+    w+=["*AMPLITUDE, NAME=RAMP,DEFINITION=SMOOTH STEP",f"0.,0.,{a.ramp:g}, 1."]
+    w+=["*SURFACE INTERACTION, NAME=CPROP","*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=HARD"]+([f"*FRICTION\n{a.friction:g}"] if a.friction > 0 else [])
+    if a.contact=="bonded": #cuff wall: no lift off once touched and no slip (explicit general contact accepts NO SEPARATION only with ROUGH)
+        w+=["*SURFACE INTERACTION, NAME=CPROP_BOND","*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=HARD, NO SEPARATION","*FRICTION, ROUGH"]
     w+=["*BOUNDARY","LIDS,ENCASTRE"]
 
     #history data: the step
-    t_total=cfg.T_RAMP+cfg.T_HOLD
+    t_total=a.ramp + cfg.T_HOLD
     w+=["*STEP, NAME=DEPLOY", "*DYNAMIC, EXPLICIT", f", {t_total:g}",
           f"*FIXED MASS SCALING, DT={cfg.DT_TARGET:g}, TYPE=BELOW MIN", "*BOUNDARY, AMPLITUDE=RAMP"]
     w+=["\n".join(f"{EXP_NODE0+i+1}, {d+1}, {d+1}, {U[i,d]:.6f}" for i in range(len(E)) for d in range(3))]
-    w += ["*CONTACT", "*CONTACT INCLUSIONS", "EXP_SURF, WALL_INNER", "*CONTACT PROPERTY ASSIGNMENT", ", , CPROP"]
-    w += ["*OUTPUT, FIELD, NUMBER INTERVAL=30", "*NODE OUTPUT", "U, RF"]
+    if root_bc: #anchor roots : radial translation back to the deployed position (same ramp), rotations held at 0
+        w+=["\n".join(f"{nr}, {d+1}, {d+1}, {u[d]:.6f}" for nr,u in root_bc for d in range(3))]
+        w+=["\n".join(f"{nr}, {d}, {d}, 0." for nr,_ in root_bc for d in (4,5,6))]
+    pairs=["EXP_SURF, WALL_INNER"]+(["SKIN_SURF, WALL_INNER","BALL_SURF, WALL_INNER","SKINARM_SURF, EXP_SURF","BALL_SURF, EXP_SURF"] if root_bc else [])
+    w+=["*CONTACT","*CONTACT INCLUSIONS"]+pairs+["*CONTACT PROPERTY ASSIGNMENT", ", , CPROP"]+(["EXP_SURF, WALL_INNER, CPROP_BOND"] if a.contact=="bonded" else [])
+    w+=["*OUTPUT, FIELD, NUMBER INTERVAL=30", "*NODE OUTPUT", "U,UR,RF" if root_bc else "U,RF","*CONTACT OUTPUT, GENERAL CONTACT","CSTRESS,CDISP"]
     w += ["*OUTPUT, HISTORY, TIME INTERVAL=" + f"{t_total / 150:g}", "*ENERGY OUTPUT", "ALLKE, ALLIE, ALLAE, ALLVD, ALLWK, ETOTAL",
-          "*ENERGY OUTPUT, ELSET=WALL", "ALLKE, ALLIE, ALLAE, ALLVD"]
+          "*ENERGY OUTPUT, ELSET=WALL", "ALLKE, ALLIE, ALLAE, ALLVD"] +(["*ENERGY OUTPUT,ELSET=ANC_B","ALLKE,ALLIE,ALLVD"] if root_bc else [])
     w+=["*END STEP"]
     (out / f"{name}.inp").write_text("\n".join(w) + "\n")
 
@@ -208,7 +293,10 @@ def main():
             "n_corner_nodes": len(X), "n_nodes": len(X10), "n_tets": len(T), "n_lid_nodes": int(lid.sum()), "n_expander_nodes": len(E),
             "n_springs": n_spr, "support": {"mode": cfg.SUPPORT_MODE, "k_area": cfg.SUPPORT_K, "d_on": cfg.SUPPORT_D_ON, "ramp": cfg.SUPPORT_RAMP, "total_N_per_mm": k_tot},
             "material": {"model": "neo-Hookean", "E_MPa": cfg.E_MPA, "nu": cfg.NU, "C10": C10, "D1": D1, "assumed": True},
-            "time": {"ramp_s": cfg.T_RAMP, "hold_s": cfg.T_HOLD, "dt_target_s": cfg.DT_TARGET}, "friction": cfg.FRICTION, "expander_node0": EXP_NODE0}
+            "time": {"ramp_s": a.ramp, "hold_s": cfg.T_HOLD, "dt_target_s": cfg.DT_TARGET}, "friction": a.friction,"tag":a.tag, "expander_node0": EXP_NODE0,
+            "device":str(device),"anchors":str(anchors or ""), "cuff_wall_contact": a.contact, "axis_rule":dev_rec.get("axis_rule","mec"), "axis_offset_e1e2_mm":dev_rec.get("axis_offset_e1e2_mm",[0.0,0.0]), "n_device_nodes":len(E)+n_anc,
+            "anchor_model":{"E_eff_MPa":cfg.ANCHOR_E_EFF,"nu":cfg.ANCHOR_NU,"alpha":cfg.ANCHOR_ALPHA,"density":cfg.NITI_DENSITY} if anchors else None}
+    
     (out / f"{name}_info.json").write_text(json.dumps(info, indent=1))
     print(f"wrote {out / (name + '.inp')} ({(out / (name + '.inp')).stat().st_size / 1e6:.1f} MB)")
 

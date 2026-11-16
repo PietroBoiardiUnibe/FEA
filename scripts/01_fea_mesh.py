@@ -59,7 +59,30 @@ def barycentric(P,F,Q):
         best_t[better], best_w[better], best_d[better] = t[better], W[better], d[better]
     return best_t, best_w, best_d
 
-    
+def zone_faces(P,F,centre_tree, R):
+    """True for faces whose centroid lies within R mm of the TV annulus (the zone where the device deployment loads the wall)"""
+    return centre_tree.query(P[F].mean(1))[0]<R
+
+def refine_zone(P_in,F_in,ann_tree,n_faces,R,k):
+    """Decimate the inner SSM surface to the base density putside the zone and k^2 x that density inside it (two passes, each on selected faces only)"""
+    area=lambda P,F: 0.5*np.linalg.norm(np.cross(P[F[:,1]]-P[F[:,0]],P[F[:,2]]-P[F[:,0]]),axis=1)
+    A=area(P_in,F_in); near=zone_faces(P_in,F_in,ann_tree,R); fz=A[near].sum()/A.sum() #area fraction of the identified refinement zone
+    ms=pymeshlab.MeshSet(); ms.add_mesh(pymeshlab.Mesh(vertex_matrix=P_in, face_matrix=F_in))
+    for inside,target in ((True,int(n_faces*k**2*fz)),(False,int(n_faces*(1-fz)))):
+        m=ms.current_mesh(); P,F=m.vertex_matrix(),m.face_matrix(); sel=(zone_faces(P,F,ann_tree,R)==inside).astype(float)
+        ms.add_mesh(pymeshlab.Mesh(vertex_matrix=P,face_matrix=F,f_scalar_array=sel)); ms.compute_selection_by_condition_per_face(condselect="fq > 0.5")
+        ms.meshing_decimation_quadric_edge_collapse(targetfacenum=target,selected=True,preservenormal=True,planarquadric=True,qualitythr=0.5)  # target = SELECTED faces
+    m=ms.current_mesh(); return m.vertex_matrix().astype(float),m.face_matrix()
+
+def remesh_zone(P,F,ann_tree,R,edge):
+    """Re-mesh only the outer surface faces within R mm of the annulus to the finer edge"""
+    ms=pymeshlab.MeshSet(); ms.add_mesh(pymeshlab.Mesh(vertex_matrix=P,face_matrix=F, f_scalar_array=zone_faces(P,F,ann_tree,R).astype(float)))
+    ms.compute_selection_by_condition_per_face(condselect="fq>0.5")
+    ms.meshing_isotropic_explicit_remeshing(iterations=10, targetlen=pymeshlab.PureValue(edge), featuredeg=180, selectedonly=True,
+                                            checksurfdist=True, maxsurfdist=pymeshlab.PureValue(0.1*edge))
+    m=ms.current_mesh(); return m.vertex_matrix().astype(float), m.face_matrix()
+
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--id",default="SYN_0001")
@@ -77,19 +100,27 @@ def main():
     t0=time.time()
 
     #decimate inner ssm generated surface to the target number of faces to run mesh convergence study and make computational bearable
-    ms=pymeshlab.MeshSet()
-    ms.add_mesh(pymeshlab.Mesh(vertex_matrix=P_in,face_matrix=F_in))
-    ms.meshing_decimation_quadric_edge_collapse(targetfacenum=n_faces, preservenormal=True,planarquadric=True,qualitythr=0.5)
-    m=ms.current_mesh()
-    P,F=m.vertex_matrix().astype(float),m.face_matrix()
+    zone=cfg.REFINE_ZONE.het(a.level) #refinement factor k inside the device zone for local sizing and refinement (None=uniform level)
+    ann_tree=cKDTree(P_in[labels["tv_annulus"]==1])
+    if zone:
+        P,F=refine_zone(P_in,F_in, ann_tree,n_faces,cfg.ZONE_MM, zone)
+    else:
+        ms=pymeshlab.MeshSet()
+        ms.add_mesh(pymeshlab.Mesh(vertex_matrix=P_in, face_matrix=F_in))
+        ms.meshing_decimation_quadric_edge_collapse(targetfacenum=n_faces,preservenormal=True, planarquadric=True, qualitythr=0.5)
+        m=ms.current_mesh()
+        P,F=m.vertex_matrix(), m.face_matrix()
 
     #outer surface= inner surface offset by outward wall growth, remeshed to outer edge length
     mesh_io = load_module("mesh_io", cfg.SHAPE_SCRIPTS)
     polydata_from_arrays = mesh_io.polydata_from_arrays
     offset_P,offset_F=g.offset_surface(polydata_from_arrays(P,F),cfg.WALL_THICKNESS,cfg.OFFSET_SPACING, cfg.OFFSET_SIGMA)
     P_out,F_out=g.remesh(offset_P,offset_F,outer_edge)
+    if zone:
+        P_out,F_out=remesh_zone(P_out,F_out,ann_tree,cfg.ZONE_MM+cfg.WALL_THICKNESS, outer_edge/zone) #outer zone measured from inner annulus
+        
 
-    # tetrahedral mesh between the two surfaces: every inner vertex must come oyt as a mesh node
+    # tetrahedral mesh between the two surfaces: every inner vertex must come out as a mesh node
     X,tets,quality=g.volume_mesh((P,F),(P_out,F_out))
     tree = cKDTree(X)
     miss, ssm_node = tree.query(P)

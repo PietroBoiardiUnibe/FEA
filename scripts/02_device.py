@@ -11,6 +11,8 @@ import argparse
 import json
 import vtk
 from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
+import fea_common as fc
+
 
 def load(path):
     return trimesh.load(str(path),process=True) #stl is a triangle mix: merge duplicated vertices so that closedness can be tested
@@ -112,6 +114,8 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--id",default="SYN_0001")
     ap.add_argument("--ntheta",type=int,default=120, help="nodes around the expander")
+    ap.add_argument("--axis",default=cfg.AXIS_RULE,choices=("centroid","perimeter","mec"), help="cuff axis rule (default: clinical CT convention, annulus centroid)")
+    ap.add_argument("--out",default="device", help="output folder under runs/<id>/ (e.g. device_mec for a comparison)")
     a=ap.parse_args()
 
     m=measure(cfg.EVOQUE)
@@ -119,6 +123,8 @@ def main():
     cuff=revolve(cuff_profile(m))
     print(f"nominal cuff: watertight {cuff.is_watertight}, faces {len(cuff.faces):,}, volume {cuff.volume:,.0f} mm3")
     plan=json.loads((cfg.PLANS/f"{a.id}_plan.json").read_text())
+    off=fc.contour_centre(plan,a.axis); plan=fc.axis_plan(plan,off) # the cuff axis: every point of the expander is placed about it
+    print(f"cuff axis rule '{a.axis}': {np.linalg.norm(off):.2f} mm from the 07b centre at {np.degrees(np.arctan2(off[1], off[0])) % 360:.0f} deg (e1/e2 plane)")
 
     #which EVOQUE sizing does the annulus get?
     size,note=choose_size(plan["d_perim_mm"],plan["d_max_mm"],cfg.SIZING_PHASE)
@@ -144,12 +150,16 @@ def main():
     r=vtk.vtkXMLPolyDataReader();r.SetFileName(str(cfg.HEARTS/f"{a.id}_RH.vtp"));r.Update()
     dist=vtk.vtkImplicitPolyDataDistance();dist.SetInput(r.GetOutput())
     sd=np.array([dist.EvaluateFunction(p) for p in X_crimped]) # < 0: inside the blood pool
+    while sd.max()>=0:  # RULE: the crimped expander must start inside the blood pool -> shrink the start radius
+        crimp*=0.97; assert crimp > 0.2, "no start radius puts the expander inside the blood pool"
+        X_crimped=to_world(final_local*np.array([crimp,crimp,1.0]),plan,z_mid); sd=np.array([dist.EvaluateFunction(p) for p in X_crimped])
     print(f"crimped expander vs the wall: signed distance max {sd.max():+.2f} mm (must be < 0), nodes inside the tissue: {int((sd >= 0).sum())}, closest clearance {-sd.max():.2f} mm")
-    out=cfg.RUNS/a.id/"device"; out.mkdir(parents=True,exist_ok=True)
+    out=cfg.RUNS/a.id/a.out; out.mkdir(parents=True,exist_ok=True)
     write_expander(out/"expander.vtp",X_crimped,quads,X_final)
     (out / "device.json").write_text(json.dumps({"id": a.id, "size_mm": size, "sizing_phase": cfg.SIZING_PHASE, "note": note, "d_perim_mm": plan["d_perim_mm"], "d_max_mm": plan["d_max_mm"],
                                                  "oversizing_pct": 100 * (size / plan["d_perim_mm"] - 1), "scale": s, "leaflet_thickness_mm": cfg.NATIVE_LEAFLET_THICKNESS,
-                                                 "expander_r_widest_mm": r_wide, "start_radius_mm": plan["R0_mm"], "z_band_mid_nominal_mm": z_mid}, indent=1))
+                                                 "expander_r_widest_mm": r_wide, "start_radius_mm": float(crimp*r_wide), "z_band_mid_nominal_mm": z_mid, "axis_rule":a.axis,
+                                                 "axis_offset_e1e2_mm":off.tolist()}, indent=1))
     print("wrote", out / "expander.vtp")
 
 if __name__=="__main__":
