@@ -100,7 +100,7 @@ def main():
     t0=time.time()
 
     #decimate inner ssm generated surface to the target number of faces to run mesh convergence study and make computational bearable
-    zone=cfg.REFINE_ZONE.het(a.level) #refinement factor k inside the device zone for local sizing and refinement (None=uniform level)
+    zone=cfg.REFINE_ZONE.get(a.level) #refinement factor k inside the device zone for local sizing and refinement (None=uniform level)
     ann_tree=cKDTree(P_in[labels["tv_annulus"]==1])
     if zone:
         P,F=refine_zone(P_in,F_in, ann_tree,n_faces,cfg.ZONE_MM, zone)
@@ -109,7 +109,7 @@ def main():
         ms.add_mesh(pymeshlab.Mesh(vertex_matrix=P_in, face_matrix=F_in))
         ms.meshing_decimation_quadric_edge_collapse(targetfacenum=n_faces,preservenormal=True, planarquadric=True, qualitythr=0.5)
         m=ms.current_mesh()
-        P,F=m.vertex_matrix(), m.face_matrix()
+        P,F=m.vertex_matrix().astype(float),m.face_matrix()
 
     #outer surface= inner surface offset by outward wall growth, remeshed to outer edge length
     mesh_io = load_module("mesh_io", cfg.SHAPE_SCRIPTS)

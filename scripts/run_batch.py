@@ -4,7 +4,7 @@ Per job:  01 (FEA mesh, only if that level is missing) -> 03 (input) -> Abaqus -
 
   python run_batch.py matrix [--axes cen mec]        ALL cross-checks of the cuff-only pilot at L3: axis rule x cuff-wall contact (bonded | hard)
                                                       x friction (hard only: 0 | 0.2) x ramp (0.1 | 0.2 s)  = 12 jobs for two axes, cheapest first
-  python run_batch.py grid --levels L2 L3 L4 L5      the SAME model on several mesh levels (finest first); model via --base TAG --opts "03 options"
+  python run_batch.py grid --levels L1 L2 L3 L4 L5      the SAME model on several mesh levels (finest first); model via --base TAG --opts "03 options"
   python run_batch.py custom --level L3 --job TAG "03 options" [--job TAG "03 options" ...]
   python run_batch.py summary [--level L3]           one table (+ compare/matrix_summary_<level>.csv) of every finished run of the heart
   options:  --id SYN_0001   --full (full device: 02b)   --dry (print the plan only)   --redo (repeat finished jobs)   --fast (no ParaView series)
@@ -107,10 +107,9 @@ def summary(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("study", choices=("matrix", "grid", "custom", "summary")); ap.add_argument("--id", default="SYN_0001")
-    ap.add_argument("--level", default="L3"); ap.add_argument("--levels", nargs="+", default=["L2", "L3", "L4", "L5"]); ap.add_argument("--axes", nargs="+", default=["cen", "mec"], choices=("cen", "mec"))
+    ap.add_argument("--level", default="L3"); ap.add_argument("--levels", nargs="+", default=["L1", "L2", "L3", "L4", "L5"]); ap.add_argument("--axes", nargs="+", default=["cen", "mec"], choices=("cen", "mec"))
     ap.add_argument("--base", default="cen_bonded", help="grid: tag of the model run on every level"); ap.add_argument("--opts", default="", help="grid: 03 options of that model")
     ap.add_argument("--job", nargs=2, action="append", metavar=("TAG", "OPTS"), default=[])
-    ap.add_argument("--levels",nargs="+",default=["L1", "L2", "L3", "L4", "L5"])
     ap.add_argument("--full", action="store_true"); ap.add_argument("--dry", action="store_true"); ap.add_argument("--redo", action="store_true"); ap.add_argument("--fast", action="store_true")
     a = ap.parse_args()
     if a.study == "summary":
