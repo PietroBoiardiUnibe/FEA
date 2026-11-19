@@ -191,8 +191,10 @@ def main():
     ap.add_argument("--tag",default="",help="variant label: deploy_<level>_<tag>")
     ap.add_argument("--full",action="store_true",help="full device of 02b:device_full/cuff.vtp + compliant anchors (default: pilot cuff only, device/expander.vtp)")
     ap.add_argument("--contact", default=cfg.CUFF_WALL_CONTACT,choices=("bonded","hard"), help="cuff-wall contact: bonded (no separation + rough) or hard (separation allowed, Coulomb --friction); anchors: always hard")
+    ap.add_argument("--penalty", type=float, default=1.0, help="scale factor of the default general-contact penalty stiffness (sensitivity: 0.1 / 10)")
     ap.add_argument("--device_dir",default="device",help="cuff-only runs: runs/<id>/<device_dir>/expander.vtp (e.g. device_mec)")
     a=ap.parse_args()
+    assert a.penalty>0, "penalty scale factor must be > 0"
     assert a.friction>=0, "friction coefficient must be >=0 (it applies to every non-bonded contact: anchors always, skirt-wall only when --contact hard)"
     
     run=cfg.RUNS/a.id
@@ -282,7 +284,10 @@ def main():
         w+=["\n".join(f"{nr}, {d}, {d}, 0." for nr,_ in root_bc for d in (4,5,6))]
     pairs=["EXP_SURF, WALL_INNER"]+(["SKIN_SURF, WALL_INNER","BALL_SURF, WALL_INNER","SKINARM_SURF, EXP_SURF","BALL_SURF, EXP_SURF"] if root_bc else [])
     w+=["*CONTACT","*CONTACT INCLUSIONS"]+pairs+["*CONTACT PROPERTY ASSIGNMENT", ", , CPROP"]+(["EXP_SURF, WALL_INNER, CPROP_BOND"] if a.contact=="bonded" else [])
+    if a.penalty!=1.0: # penalty stiffness of every contact pair scaled (abaqus defaults to 1, chosen from the underlying element stiffness)
+        w+=["*CONTACT CONTROLS ASSIGNMENT, TYPE= SCALE PENALTY", f", , {a.penalty:g}"]
     w+=["*OUTPUT, FIELD, NUMBER INTERVAL=30", "*NODE OUTPUT", "U,UR,RF" if root_bc else "U,RF","*CONTACT OUTPUT, GENERAL CONTACT","CSTRESS,CDISP"]
+    w+=[f"*OUTPUT, FIELD, NUMBER INTERVAL={cfg.ELEM_OUT_INTERVAL}","*ELEMENT OUTPUT, ELSET=WALL","ESEDEN,EVOL,S,LE"]#wall tensors and energy density being stored
     w += ["*OUTPUT, HISTORY, TIME INTERVAL=" + f"{t_total / 150:g}", "*ENERGY OUTPUT", "ALLKE, ALLIE, ALLAE, ALLVD, ALLWK, ETOTAL",
           "*ENERGY OUTPUT, ELSET=WALL", "ALLKE, ALLIE, ALLAE, ALLVD"] +(["*ENERGY OUTPUT,ELSET=ANC_B","ALLKE,ALLIE,ALLVD"] if root_bc else [])
     w+=["*END STEP"]
@@ -293,8 +298,9 @@ def main():
             "n_corner_nodes": len(X), "n_nodes": len(X10), "n_tets": len(T), "n_lid_nodes": int(lid.sum()), "n_expander_nodes": len(E),
             "n_springs": n_spr, "support": {"mode": cfg.SUPPORT_MODE, "k_area": cfg.SUPPORT_K, "d_on": cfg.SUPPORT_D_ON, "ramp": cfg.SUPPORT_RAMP, "total_N_per_mm": k_tot},
             "material": {"model": "neo-Hookean", "E_MPa": cfg.E_MPA, "nu": cfg.NU, "C10": C10, "D1": D1, "assumed": True},
-            "time": {"ramp_s": a.ramp, "hold_s": cfg.T_HOLD, "dt_target_s": cfg.DT_TARGET}, "friction": a.friction,"tag":a.tag, "expander_node0": EXP_NODE0,
-            "device":str(device),"anchors":str(anchors or ""), "cuff_wall_contact": a.contact, "axis_rule":dev_rec.get("axis_rule","mec"), "axis_offset_e1e2_mm":dev_rec.get("axis_offset_e1e2_mm",[0.0,0.0]), "n_device_nodes":len(E)+n_anc,
+            "time": {"ramp_s": a.ramp, "hold_s": cfg.T_HOLD, "dt_target_s": cfg.DT_TARGET}, "friction": a.friction,"penalty_scale":a.penalty,"element_output":{"keys":"ESEDEN,EVOL,S,LE","interval":cfg.ELEM_OUT_INTERVAL},"tag":a.tag, "expander_node0": EXP_NODE0,
+            "device":str(device),"anchors":str(anchors or ""), "cuff_wall_contact": a.contact,"axis_rule":dev_rec.get("axis_rule","mec"),"axis_offset_e1e2_mm":dev_rec.get("axis_offset_e1e2_mm",[0.0,0.0]),
+            "n_device_nodes":len(E)+n_anc,
             "anchor_model":{"E_eff_MPa":cfg.ANCHOR_E_EFF,"nu":cfg.ANCHOR_NU,"alpha":cfg.ANCHOR_ALPHA,"density":cfg.NITI_DENSITY} if anchors else None}
     
     (out / f"{name}_info.json").write_text(json.dumps(info, indent=1))

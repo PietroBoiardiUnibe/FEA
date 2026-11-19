@@ -17,6 +17,19 @@ step=odb.steps[list(odb.steps.keys())[-1]]
 times, labels,U,RF=[],None,[],[]
 
 SENT=1e30 
+ELEM_KEYS=("ESEDEN","EVOL","S","LE")
+
+def element_field(frame,key):
+    """WALL element output-> element labels, one row per element. Integration point fields (S,LE 4 points per C2D10M) are averaged per element; whole-element fields (ESEDEN, EVOL) already have one value
+    """
+    f=frame.fieldOutputs[key]
+    lab=np.concatenate([b.elementLabels for b in f.bulkDataBlocks])
+    dat=np.concatenate([np.asarray(b.data).reshape(len(b.elementLabels),-1) for b in f.bulkDataBlocks])
+    u,inv=np.unique(lab,return_inverse=True)
+    s=np.zeros((len(u), dat.shape[1])); np.add.at(s,inv,dat)
+    return u, (s/np.bincount(inv)[:,None]).astype(np.float32)
+
+
 
 def contact_field(frame,prefix):
     """(node labels, values) of a general contact output (CPRESS/COPEN) at the nodes Abaqus tracks"""
@@ -31,6 +44,8 @@ def contact_field(frame,prefix):
 cp_ever=set() # nodes that carried contact pressure in ANY frame (detachment = ever in contact but not at the end)
 
 for frame in step.frames:
+    if "U" not in frame.fieldOutputs:
+        continue
     u=frame.fieldOutputs["U"]
     blocks=u.bulkDataBlocks # bulk access: the whole field as arrays, much faster than looping over values
     lab=np.concatenate([b.nodeLabels for b in blocks])
@@ -56,7 +71,22 @@ for region_name, region in step.historyRegions.items():
         if key in ("ALLKE", "ALLIE", "ALLAE", "ALLVD", "ALLWK", "ETOTAL"):
             hist[tag+key]=np.array(out.data,dtype=float)
 
+E_t,E_lab,E_dat=[],None,dict((k,[]) for k in ELEM_KEYS)
+for frame in step.frames:    # frames that carry the wall element output (every ELEM_OUT_INTERVAL)
+    if "ESEDEN" not in frame.fieldOutputs:
+        continue
+    E_t.append(frame.frameValue)
+    for k in ELEM_KEYS:
+        if k in frame.fieldOutputs:
+            E_lab,v=element_field(frame,k); E_dat[k].append(v)
+
 result={"times":np.array(times),"labels":labels,"U":np.stack(U)}
+
+if E_t:
+    result["elem_times"], result["elem_labels"]=np.array(E_t),E_lab #element label k 
+    for k in ELEM_KEYS:
+        if E_dat[k]:
+            result["elem_"+k]=np.stack(E_dat[k])
 
 if cp_ever or "cp_last" in globals():
     result["cpress_ever_labels"]=np.array(sorted(cp_ever),dtype=np.int64)

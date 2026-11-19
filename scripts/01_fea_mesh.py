@@ -2,7 +2,7 @@
 Coarse FEA wall unstructured tet mesh for the pilot synthetic heart
 
 Why: the 07a wall of SYN_0001 has 584k quadratic nodes, above the licence cap (250k). For the FEA ONLY we decimate the inner (SSM) surface,
-grow the wall around it with the 07a recipe, and store a map that puts the FEA displacement back on EVERY vertex of the original SSM surface.
+grow the wall around it with the 07a methodology, and store a map that puts the FEA displacement back on EVERY vertex of the original SSM surface.
 
 Adjustments will be made to refinement or coarsening strategy of the mesh when transitioning to surface 
 blood pool triangulated meshes to shells that will undergo FEA simulations

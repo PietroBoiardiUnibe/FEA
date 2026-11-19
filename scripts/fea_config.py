@@ -45,7 +45,7 @@ SUPPORT_D_ON=20.0              # mm: no support within this distance of the TV r
 SUPPORT_RAMP=15.0              # mm: smooth-step rise to full support (full beyond 35 mm)
 
 # EXPLICIT SOLVER settings (RULE)
-T_RAMP,T_HOLD=0.1,0.05 # s: smooth step expansion, then hold so the wall settles when the contact is defined
+T_RAMP,T_HOLD=0.2,0.05 # s: smooth step expansion, then hold so the wall settles when the contact is defined (0.2 s quasi static on every mesh level, see the 0.1 vs 0.2 s ramp grid sweeps)
 DT_TARGET=1.0e-5 # s: fixed mass scaling target (added mass must stay small)
 EXPANDER_NODE_MASS=1.0e-6 #t: point mass per expander mode (the penalty contact modeling for master/slave surfaces needs enforcing a nodal mass value to avoid not physical penetration)
 FRICTION=0.0 # frictionless contact not modeling the tangential pressure during contact mechanics, 0.1 as sensitivity check possible.
@@ -84,11 +84,25 @@ ANCHOR_E_EFF=319.8 # MPa : circular section r 1.2 s with the bending stiffness E
 ANCHOR_NU=0.33 #Nitinol Poisson Ratio (far from incompressibility)
 NITI_DENSITY=6.45e-9 # t/mm3 (6.45 g/cm3)
 ANCHOR_ALPHA=50.0 # 1/s mass-proportional damping (NUMERICAL: zeta ~10 % at the ~40 Hz mass-scaled cantilever mode; dissipates 2e-4 of the external work)
-CUFF_WALL_CONTACT="bonded" #"bonded"= hard + NO SEPARATION + ROUGH (Explicit general contact demands ROUGH with No Separation) | "hard" = hard + separation allowed (+ Coulomb --friction)
+CUFF_WALL_CONTACT="hard" # FROZEN 2026-11-18 (hard mu 0: lift-off allowed, no crushed tet); "bonded"= hard + NO SEPARATION + ROUGH (Explicit general contact demands ROUGH with No Separation) | "hard" = hard + separation allowed (+ Coulomb --friction)
 AXIS_RULE="centroid" # cuff axis through the centroid of the area enclosed by the TV annulus contour | "perimeter" | "mec" (07b centre)
 # mimics clinical practice as in CT based pre-procedural planning of delivery and landing of the transcatheter device
 assert CUFF_WALL_CONTACT in ("bonded","hard") and LANDING_CLEARANCE>=0, "full-device settings are out of range"
 assert AXIS_RULE in ("centroid","perimeter","mec"), "unknown axis deployment rule"
+
+# wall element output written by the 03 script also accounts ESEDEN, EVOL, S, LE, so strain and stresses): number interval of its own field request; 10= every 3rd displacement frame (30/10)
+ELEM_OUT_INTERVAL=10
+#clinical comparator for the sizing outputs for validation purposes of FEA setup and outcomes
+CLINICAL=dict(source="Penta et al. 2025, JACC Cardiovasc Interv 18:1492-4 (EVOQUE, CT n = 16)", oversizing_mean_pct=8.5, oversizing_range_pct=(3.0,14.0),frame_node3_perimeter_mm=147.9, annulus_pre_perimeter_mm=149.7)
+
+#ordered study outputs runs/<id>/compare/<subfolder>
+COMPARE_DIRS = {"mesh": "01_mesh_convergence", "qc": "02_mesh_qc", "sens": "03_sensitivity", "uq": "04_uq",
+                "deliverable": "05_direct_vs_mapped", "device": "06_device_trials"}
+
+def compare_dir(run,kind):
+    """runs/<id>/compare/<ordered subfolder of this kind of study> (created if missing)"""
+    d=run/"compare"/COMPARE_DIRS[kind]; d.mkdir(parents=True, exist_ok=True); return d
+
 
 #sanity checks: a typo in a constant must fail at import,not later in pipeline
 assert R_MID_NOMINAL>R_IN_NOMINAL>0 , "device radii are inconsistent"

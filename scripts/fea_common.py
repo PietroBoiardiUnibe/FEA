@@ -58,3 +58,30 @@ def band_ring(P0, P1, plan, nsec=24):
     rad = np.hypot(R1[:, 0], R1[:, 1])
     return dict(perimeter_before=per(R0), perimeter_after=per(R1), stretch_pct=100 * (per(R1) / per(R0) - 1),
                 mean_r=float(rad.mean()), sd_r=float(rad.std()), sectors=len(used))
+
+def annulus_sizing(P0,P1,plan,d_device,nsec=24):
+    """CLINICAL sizing of the TV annulus before and after deployment, measured with ONE tool on same annulus band nodes.
+    per angular sector (undeformed angle about the cuff axis) the median node = one annulus point; perimeter = closed 3D polygon, area = area enclosed
+    by the polygon projected on the annulus plane, perimeter-derived diameter Dp=p/pi, area derived diameter  Da = 2 sqrt(A / pi).
+    Post-procedural CT reports the same pair: annular expansion and over-sizing of nominal device diameter. 
+    In particular d_device against Dp / Da (perimeter-derived, area-derived diameter, and area oversizing = (d_device / Da)^2 - 1)"""
+    fr=plan["frame"]; c,n,e1,e2=(np.array(fr[k]) for k in ("centre","normal","e1","e2"))
+    A0,A1=[np.stack([(P - c) @ e1, (P - c) @ e2, (P - c) @ n], 1) for P in (P0,P1)]
+    ang=np.mod(np.arctan2(A0[:, 1], A0[:, 0]),2*np.pi); sec = np.minimum((ang / (2 * np.pi) * nsec).astype(int), nsec - 1)
+    used=[s for s in range(nsec) if (sec==s).any()]
+    R0, R1 = [np.array([np.median(A[sec == s], axis=0) for s in used]) for A in (A0, A1)]
+
+    def meas(R):
+        per=float(np.linalg.norm(np.roll(R,-1,0)-R, axis=1).sum()); x,y=R[:,0], R[:,1]
+        area = float(0.5 * abs(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)))
+        return dict(perimeter_mm=per, area_mm2=area, Dp_mm=per / np.pi, Da_mm=2 * np.sqrt(area / np.pi))
+    
+    pre,post=meas(R0),meas(R1)
+    over = lambda m: dict(perimeter_derived_pct=100 * (d_device / m["Dp_mm"] - 1), area_derived_pct=100 * (d_device / m["Da_mm"] - 1),
+                          area_pct=100 * ((d_device / m["Da_mm"]) ** 2 - 1))
+    r1 = np.hypot(R1[:, 0], R1[:, 1])
+    return dict(pre=pre, post=post, perimeter_stretch_pct=100 * (post["perimeter_mm"] / pre["perimeter_mm"] - 1),
+                area_increase_pct=100 * (post["area_mm2"] / pre["area_mm2"] - 1), oversizing_vs_pre=over(pre), oversizing_vs_post=over(post),
+                d_device_mm=float(d_device), sectors=len(used), theta=np.array([np.median(ang[sec == s]) for s in used]),
+                r0=np.hypot(R0[:, 0], R0[:, 1]), r1=r1, sd_r_after=float(r1.std()), mean_r_after=float(r1.mean()))
+

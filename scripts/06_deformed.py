@@ -66,21 +66,12 @@ def energy_report(res,t_ramp):
     late=t>=0.5 * t[-1]
     return dict(KE_over_IE_end_pct=float(100 * ke[-1] / ie[-1]), KE_over_IE_max_second_half_pct=float(100 * np.max(ke[late] / np.maximum(ie[late], 1e-30))),
                 hourglass_over_IE_pct=float(100 * ae[-1] / ie[-1]), viscous_over_IE_pct=float(100 * vd[-1] / ie[-1]), max_internal_energy_mJ=float(ie.max()),
-                t=t, ratio=100 * ke / np.maximum(ie, 1e-30), ie=ie)
+                t=t, ratio=100 * ke / np.maximum(ie, 1e-30), ie=ie, t_ramp=float(t_ramp))
 
 def mesh_volume(P,F):
     """Volume enclosed by a triangle surface (divergence theorem)"""
     return abs(np.einsum("ij,ij->i", P[F[:, 0]], np.cross(P[F[:, 1]], P[F[:, 2]])).sum() / 6.0)
 
-def ring_of(P,F,plan,tv,b07,polydata_from_arrays):
-    """Radius r(theta) and height z(theta) of the TV ring around the plane axis, measured with the same tool as the planning phase (07b)"""
-    tree=vtk.vtkOBBTree(); tree.SetDataSet(polydata_from_arrays(P,F)); tree.BuildLocator()
-    fr=plan["frame"]; ann= {k: np.array(fr[k]) for k in ("centre", "normal", "e1", "e2")}
-    th=np.array(plan["ring"]["theta"])
-    r,z,X=b07.ring(tree,dict(ann,band=P[tv]),th,8)
-    if not np.isfinite(r).all():
-        raise RuntimeError(f"{np.isnan(r).sum()} ring rays missed the wall (VTK {vtk.vtkVersion.GetVTKVersion()}); use the shapeworks env")
-    return th,r,z,X
 
 def seal_line(X_final,poly_deformed, plan, nbin=120):
     """ chcks that there is a closed contact line around the device; for every angle bin the closest approach of the expander's final surface to the tissue.
@@ -131,8 +122,9 @@ def style(ax):
 
 def summary_figure(path, en, th, r0, r1, dev, out, rows, gap, z_lo, z_hi, plan, a):
     plt.rcParams["font.family"] = ["Segoe UI", "DejaVu Sans"]
-    fig, axs = plt.subplots(2, 3, figsize=(15.5, 8.2), facecolor=SURFACE)
-    fig.suptitle(f"{a.id}  |  EVOQUE-like device {dev['size_mm']} mm deployed in the SSM-derived wall (mesh level {a.level})", x=0.012, ha="left", color=INK, fontsize=13, fontweight="bold")
+    fig, axs = plt.subplots(2, 4, figsize=(20.5, 8.2), facecolor=SURFACE)
+    fig.suptitle(f"{a.id}  |  EVOQUE-like device {dev['size_mm']} mm deployed in the SSM-derived wall (mesh level {a.level}, {a.tag or 'base'}; "
+                 f"measured on the {out['surface']} surface)", x=0.012, ha="left", color=INK, fontsize=13, fontweight="bold")
     deg = np.degrees(th) % 360; o = np.argsort(deg)
 
     ax = axs[0, 0]; style(ax)                                              # A: the ring becomes circular
@@ -145,11 +137,15 @@ def summary_figure(path, en, th, r0, r1, dev, out, rows, gap, z_lo, z_hi, plan, 
 
     ax = axs[0, 1]; style(ax)                                              # B: quasi-static
     t, ratio, ie = en["t"], en["ratio"], en["ie"]; ok = ie > 0.05 * ie.max()
-    ax.axvspan(0.1, t[-1], color=GRID, alpha=0.7, lw=0); ax.text(0.1 + 0.002, 0.93, "hold", color=INK2, fontsize=8.5, transform=ax.get_xaxis_transform())
+    tr = en["t_ramp"]                                                     # the run's OWN ramp (0.1 s default, 0.2 s in the rate-sensitivity runs)
+    ax.axvspan(tr, t[-1], color=GRID, alpha=0.7, lw=0); ax.text(tr + 0.002, 0.93, "hold", color=INK2, fontsize=8.5, transform=ax.get_xaxis_transform())
+    ax.text(t[ok][0] + 0.002, 0.93, f"ramp ({tr:g} s)", color=INK2, fontsize=8.5, transform=ax.get_xaxis_transform())
+    in_ramp = ok & (t <= tr + 1e-9); ramp_mean = float(ratio[in_ramp].mean()) if in_ramp.any() else float("nan")
     ax.plot(t[ok], ratio[ok], color=BLUE, lw=2); ax.axhline(cfg.MAX_KE_IE_PCT, color=INK2, lw=1, ls="--")
     ax.text(t[-1], cfg.MAX_KE_IE_PCT + 0.25, f"{cfg.MAX_KE_IE_PCT:g} % limit", color=INK2, fontsize=8.5, ha="right", va="bottom")
     ax.set(xlim=(t[ok][0], t[-1]), ylim=(0, min(30, max(10, np.percentile(ratio[ok], 98) * 1.1))), xlabel="time (s)", ylabel="wall kinetic / internal energy (%)")
-    ax.set_title(f"Quasi-static: kinetic energy ends at {out['KE_over_IE_end_pct']:.1f} % of internal\nhourglass energy {out['hourglass_over_IE_pct']:.1f} %", loc="left", color=INK, fontsize=10)
+    ax.set_title(f"Quasi-static: kinetic/internal energy {ramp_mean:.1f} % over the ramp, {out['KE_over_IE_end_pct']:.1f} % at the end\n"
+                 f"hourglass energy {out['hourglass_over_IE_pct']:.1f} %", loc="left", color=INK, fontsize=10)
 
     ax = axs[0, 2]; style(ax)                                              # C: the deformation is local
     x = np.arange(len(rows)); p95 = [r["p95_drift_removed_mm"] for r in rows]
@@ -176,16 +172,47 @@ def summary_figure(path, en, th, r0, r1, dev, out, rows, gap, z_lo, z_hi, plan, 
     ax.set(xlim=(0, 360), xlabel="angle around the device (deg)", ylabel="axial height, + toward the ventricle (mm)"); ax.set_xticks(range(0, 361, 90))
     ax.set_title(f"Where the tissue grips the device (gap at most 0.3 mm)\ncontact band {out['contact_band_mm'][0]:+.1f} to {out['contact_band_mm'][1]:+.1f} mm, median height {out['contact_band_median_height_mm']:.1f} mm", loc="left", color=INK, fontsize=10)
 
-    ax = axs[1, 2]; ax.axis("off")                                        # F: headline numbers
-    lines = [("Ring perimeter", f"{out['ring_perimeter_before_mm']:.1f} to {out['ring_perimeter_after_mm']:.1f} mm  ({out['ring_stretch_pct']:+.1f} %)"),
+    ax = axs[1, 2]; ax.axis("off") 
+    sz=out["sizing"];o=sz["oversizing_vs_pre"]                                       # F: headline numbers
+    lines = [("Annular expansion (perimeter / area)", f"{sz['perimeter_stretch_pct']:+.1f} % / {sz['area_increase_pct']:+.1f} %  (Dp {sz['pre']['Dp_mm']:.1f} -> {sz['post']['Dp_mm']:.1f} mm)"),
              ("Blood-pool volume", f"{out['volume_before_ml']:.1f} to {out['volume_after_ml']:.1f} ml  ({out['volume_after_ml'] - out['volume_before_ml']:+.1f})"),
              ("Largest displacement", f"{out['max_disp_mm']:.1f} mm"),
-             ("Device oversizing", f"{dev['oversizing_pct']:.1f} % (perimeter-derived diameter)"),
+             (f"Oversizing of the {dev['size_mm']} mm device (perimeter- / area-derived D, area)",
+              f"{o['perimeter_derived_pct']:.1f} / {o['area_derived_pct']:.1f} / {o['area_pct']:.1f} %"),
              ("Penetration of tissue", f"{out['max_penetration_mm']:.2f} mm"),
              ("Code", f"FEA {out['fea_repo']}, shape {out['shape_repo']}")]
     for i, (k, v) in enumerate(lines):
         y = 0.93 - i * 0.16
         ax.text(0.0, y, k, color=INK2, fontsize=9, transform=ax.transAxes); ax.text(0.0, y - 0.06, v, color=INK, fontsize=12.5, fontweight="bold", transform=ax.transAxes)
+    ax = axs[0, 3]; style(ax)                                              # G: clinical sizing = the validation benchmark
+    cl, pl = cfg.CLINICAL, sz["planned_07b"]
+    names = ["oversizing\nperimeter D", "oversizing\narea D", "oversizing\narea", "expansion\nperimeter", "expansion\narea"]
+    model = [o["perimeter_derived_pct"], o["area_derived_pct"], o["area_pct"], sz["perimeter_stretch_pct"], sz["area_increase_pct"]]
+    plan7 = [pl["perimeter_derived_pct"], pl["area_derived_pct"], pl["area_pct"]]
+    x = np.arange(5)
+    ax.fill_between([-0.45, 0.45], *cl["oversizing_range_pct"], color=GRID, lw=0, zorder=0)          # clinical range behind the perimeter-based bar
+    ax.hlines(cl["oversizing_mean_pct"], -0.45, 0.45, color=INK2, lw=1.2, ls="--", zorder=1)
+    ax.bar(x[:3] - 0.18, plan7, width=0.34, color=MUTED, label="planned 07b (input)")
+    ax.bar(x[:3] + 0.18, model[:3], width=0.34, color=BLUE, label="this run, band nodes (input)")
+    ax.bar(x[3:], model[3:], width=0.5, color=ORANGE, label="annular expansion (FEA output)")
+    for xi, v in zip(list(x[:3] + 0.18) + list(x[3:]), model):
+        ax.text(xi, v + 0.6, f"{v:.1f}", ha="center", color=INK2, fontsize=8.5)
+    ax.set_xticks(x); ax.set_xticklabels(names, fontsize=8); ax.set_ylabel("%"); ax.set_ylim(min(0, min(model)), max(model + plan7) * 1.45)
+    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    ax.set_title(f"Clinical sizing (validation benchmark)\ngrey = clinical oversizing {cl['oversizing_range_pct'][0]:g}-{cl['oversizing_range_pct'][1]:g} %, "
+                 f"dashed = mean {cl['oversizing_mean_pct']:g} %", loc="left", color=INK, fontsize=10)
+
+    ax = axs[1, 3]; ax.axis("off")                                        # H: sizing table
+    pre, post = sz["pre"], sz["post"]
+    rows_h = [("Annulus perimeter pre -> post", f"{pre['perimeter_mm']:.1f} -> {post['perimeter_mm']:.1f} mm"),
+              ("Annulus area pre -> post", f"{pre['area_mm2']:.0f} -> {post['area_mm2']:.0f} mm2"),
+              ("Dp / Da pre (band nodes)", f"{pre['Dp_mm']:.1f} / {pre['Da_mm']:.1f} mm"),
+              ("Dp / Da planned", f"{pl['Dp_mm']:.1f} / {pl['Da_mm']:.1f} mm"),
+              ("Clinical comparator", cl["source"])]
+    for i, (k, v) in enumerate(rows_h):
+        y = 0.93 - i * 0.16
+        ax.text(0.0, y, k, color=INK2, fontsize=9, transform=ax.transAxes)
+        ax.text(0.0, y - 0.06, v, color=INK, fontsize=11 if i < 4 else 8.5, fontweight="bold", transform=ax.transAxes)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(path, dpi=160, facecolor=SURFACE); plt.close(fig)
 
@@ -222,6 +249,7 @@ def main():
     ap.add_argument("--level",default="L3",choices=sorted(cfg.INNER_FACES))
     ap.add_argument("--no_series",action="store_true",help="skip the ParaView time series (slow part)")
     ap.add_argument("--tag",default="",help="variant label of the run:deploy_<level>_<tag>")
+    ap.add_argument("--surface",default="direct",choices=["direct","mapped"],help="surface every feature is measured on: direct = FEA deformed inner surface (deliverable, default)")
     a=ap.parse_args()
     run=cfg.RUNS/a.id
     suffix=f"_{a.tag}" if a.tag else ""
@@ -231,7 +259,6 @@ def main():
 
     mesh_io = load_module("mesh_io", cfg.SHAPE_SCRIPTS)
     polydata_from_arrays = mesh_io.polydata_from_arrays
-    b07=load_module("07b_deploy_plan",cfg.SHAPE_SCRIPTS)
     res = np.load(dep / f"{name}_results.npz"); info = json.loads((dep / f"{name}_info.json").read_text())
     mp=np.load(run/"mesh"/f"{a.id}_wall_{a.level}_map.npz")
     plan = json.loads((cfg.PLANS / f"{a.id}_plan.json").read_text())
@@ -257,25 +284,40 @@ def main():
     mag=np.linalg.norm(Uf,axis=1)
     keep={n: vtk_to_numpy(heart.GetPointData().GetArray(n)) for n in ("chamber", "tv_annulus", "patch")}
     write_polydata(post/f"{name}_deformed.vtp",make_poly(P1,heart.GetPolys(), dict(keep, displacement=Uf, displacement_mm=mag)))
-    out.update(max_disp_mm=float(mag.max()), volume_before_ml=mesh_volume(P0, F0) / 1000, volume_after_ml=mesh_volume(P1, F0) / 1000)
-    print(f"deformed surface: max displacement {mag.max():.2f} mm; blood-pool volume {out['volume_before_ml']:.1f} -> {out['volume_after_ml']:.1f} ml")
+    print(f"mapped SSM surface written (validation/visualisation): max displacement {mag.max():.2f} mm")
+    # direct surface= the deliverable mesh from 06c which is FEA's own deformed shape. Every feature below is measured on it by default (--surface direct),
+    # so the reported numbers describe the geometry handed to CFD/FSI; --surface mapped = the SSM-vertex surface above (validation only)
+    rw=vtk.vtkXMLUnstructuredGridReader(); rw.SetFileName(str(run/"mesh"/f"{a.id}_wall_{a.level}.vtu")); rw.Update(); g=rw.GetOutput()
+    Xw=vtk_to_numpy(g.GetPoints().GetData()).astype(float); cn,Fd=mp["coarse_nodes"],mp["faces"]
+    D0=Xw[cn]; D1=D0+res["U"][-1].astype(float)[np.searchsorted(labels, cn+1)];tvd=vtk_to_numpy(g.GetPointData().GetArray("tv_annulus"))[cn]==1
+    S0,S1,SF,stv=(D0,D1,Fd,tvd) if a.surface=="direct" else (P0,P1,F0,tv)
+    smag=np.linalg.norm(S1-S0,axis=1)
+    out.update(surface=a.surface, surface_vertices=int(len(S0)), max_disp_mm=float(smag.max()),
+               volume_before_ml=mesh_volume(S0,SF)/1000, volume_after_ml=mesh_volume(S1,SF)/1000)
+    print(f"features measured on the {a.surface.upper()} surface ({len(S0):,} vertices): max displacement {smag.max():.2f} mm, "
+          f"blood-pool volume {out['volume_before_ml']:.1f} -> {out['volume_after_ml']:.1f} ml")
 
-    # the ring before and after the deployment
-    th,r0,_,_=ring_of(P0,F0,plan,tv,b07,polydata_from_arrays)
-    _,r1,_,X1=ring_of(P1,F0,plan,tv,b07,polydata_from_arrays)
-    out.update(ring_SD_before_mm=float(np.nanstd(r0)),ring_SD_after_mm=float(np.nanstd(r1)),
-               ring_radius_after_mm=[float(np.nanmin(r1)),float(np.nanmean(r1)),float(np.nanmax(r1))],
-               ring_perimeter_before_mm=float(plan["perimeter_mm"]), ring_perimeter_after_mm=float(np.linalg.norm(np.roll(X1, -1, axis=0) - X1, axis=1).sum()))
-    out["ring_stretch_pct"]=100*(out["ring_perimeter_after_mm"]/out["ring_perimeter_before_mm"] -1)
-    print(f"ring: SD {out['ring_SD_before_mm']:.2f} -> {out['ring_SD_after_mm']:.2f} mm, radius {out['ring_radius_after_mm'][0]:.2f}..{out['ring_radius_after_mm'][2]:.2f} mm, "
-          f"perimeter {out['ring_perimeter_before_mm']:.1f} -> {out['ring_perimeter_after_mm']:.1f} mm ({out['ring_stretch_pct']:+.1f} %)")
-
+    #the annulus before and after (clinical sizing: annular sizing plus oversizing, the numbers form postpreocedural CT scans)
+    sz=fc.annulus_sizing(S0[stv],S1[stv],plan,dev["size_mm"])
+    th,r0,r1=sz["theta"],sz["r0"], sz["r1"]
+    out.update(ring_SD_before_mm=float(r0.std()),ring_SD_after_mm=sz["sd_r_after"],ring_radius_after_mm=[float(r1.min()),sz["mean_r_after"],float(r1.max())],
+               ring_perimeter_before_mm=sz["pre"]["perimeter_mm"],ring_perimeter_after_mm=sz["post"]["perimeter_mm"],ring_stretch_pct=sz["perimeter_stretch_pct"])
+    out["sizing"]=dict({k:v for k,v in sz.items() if k not in ("theta","r0","r1")},
+                       planned_07b=dict(Dp_mm=plan["d_perim_mm"],Da_mm=plan["d_area_mm"],perimeter_mm=plan["perimeter_mm"],
+                                        perimeter_derived_pct=100*(dev["size_mm"]/plan["d_perim_mm"]-1),area_derived_pct=100*(dev["size_mm"]/plan["d_area_mm"]-1),
+                                        area_pct=100*((dev["size_mm"]/plan["d_area_mm"])**2-1)))
+    pl,o=out["sizing"]["planned_07b"],sz["oversizing_vs_pre"]
+    print(f"annulus (band nodes, {sz['sectors']} sectors): perimeter {sz['pre']['perimeter_mm']:.1f} -> {sz['post']['perimeter_mm']:.1f} mm ({sz['perimeter_stretch_pct']:+.1f} %), "
+          f"area {sz['pre']['area_mm2']:.0f} -> {sz['post']['area_mm2']:.0f} mm2 ({sz['area_increase_pct']:+.1f} %); SD {out['ring_SD_before_mm']:.2f} -> {out['ring_SD_after_mm']:.2f} mm")
+    print(f"oversizing of the {dev['size_mm']} mm device: perimeter-derived {o['perimeter_derived_pct']:.1f} % (planning 07b {pl['perimeter_derived_pct']:.1f} %), "
+          f"area-derived diameter {o['area_derived_pct']:.1f} % ({pl['area_derived_pct']:.1f} %), area {o['area_pct']:.1f} % ({pl['area_pct']:.1f} %)")
+    
     # find out if there is a closed contact line around device once expanded to verify absence of major PVL
     exp=read_polydata(cuff_file)
     E=vtk_to_numpy(exp.GetPoints().GetData()).astype(float)
     idx_exp=np.searchsorted(labels,info["expander_node0"]+1+np.arange(len(E)))
     X_final=E+res["U"][-1].astype(float)[idx_exp]
-    deformed=polydata_from_arrays(P1,F0)
+    deformed=polydata_from_arrays(S1,SF)
     sd,gap,z_lo,z_hi=seal_line(X_final, deformed,plan)
     out.update(seal_worst_angle_gap_mm=float(np.nanmax(gap)),seal_median_gap_mm=float(np.nanmedian(gap)),seal_angles_above_0p3mm=int((gap>0.3).sum()),seal_angles=int(len(gap)),contact_band_mm=[float(np.nanmin(z_lo)),float(np.nanmax(z_hi))],
                contact_band_median_height_mm=float(np.nanmedian(z_hi-z_lo)),max_penetration_mm=float(max(sd.max(),0.0)))
@@ -283,7 +325,7 @@ def main():
           f"contact band {out['contact_band_mm'][0]:+.1f}..{out['contact_band_mm'][1]:+.1f} mm (median height {out['contact_band_median_height_mm']:.1f} mm), penetration {out['max_penetration_mm']:.2f} mm")
 
     # verify that the deformation is local only
-    rows,drift_deg, drift_mm= far_field(P0,P1,tv)
+    rows,drift_deg, drift_mm= far_field(S0,S1,stv)
     out.update(far_field=rows,far_field_drift_deg=drift_deg,far_field_drift_mm=drift_mm)
     print("far field p95 (drift removed): " + ", ".join(f"{r['band_mm'][0]}-{r['band_mm'][1]} mm {r['p95_drift_removed_mm']:.2f}" for r in rows) + f" | drift {drift_deg:.2f} deg / {drift_mm:.2f} mm")
     (post / f"{name}_deployed.json").write_text(json.dumps(out, indent=1))
