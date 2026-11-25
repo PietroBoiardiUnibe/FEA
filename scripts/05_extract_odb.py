@@ -42,6 +42,7 @@ def contact_field(frame,prefix):
     return lab[ok],dat[ok]
 
 cp_ever=set() # nodes that carried contact pressure in ANY frame (detachment = ever in contact but not at the end)
+CP={} #frame index -> node labels, CPRESS; of every frame with contact output: the contact-pressure time series (animation)
 
 for frame in step.frames:
     if "U" not in frame.fieldOutputs:
@@ -60,7 +61,8 @@ for frame in step.frames:
         RF.append(rd[np.argsort(rl)].astype(np.float32))
         cl,cv=contact_field(frame,"CPRESS")
         if cl is not None:
-            cp_ever.update(cl[cv>1e-6].tolist()); cp_last=(cl,cv)
+            cp_ever.update(cl[cv>1e-6].tolist()); cp_last=(cl,cv); CP[len(times)-1]=(cl,cv)
+                       
 
 
 hist={}
@@ -94,6 +96,14 @@ if cp_ever or "cp_last" in globals():
     ol,ov=contact_field(step.frames[-1],"COPEN")
     if ol is not None:
         result["copen_last_labels"],result["copen_last"]=ol,ov.astype(np.float32)
+
+if CP: # one row per U frame, one column per node that ever had contact output  (0 where Abaqus reported nothing)
+    cl_all=np.unique(np.concatenate([l for l,_ in CP.values()]))
+    M=np.zeros((len(times),len(cl_all)), dtype=np.float32)
+    for i, (l,v) in CP.items():
+        M[i,np.searchsorted(cl_all,l)]=v
+    result["cpress_labels"],result["cpress"]=cl_all,M
+
 
 if RF:
     result["RF"] = np.stack(RF)

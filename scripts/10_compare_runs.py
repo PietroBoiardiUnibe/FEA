@@ -445,8 +445,7 @@ def mesh_mode(a,run):
                                 f"coarsest level whose QoIs (and those of every finer level) all stay within {CRIT:g} % of the finest level"),
                             rule_name=a.rule, selected_plain_rule=sel_plain,
                             worst_fraction_of_limit=ratio, worst_qoi=worst_k, selected=selected)
-    dst=run/"compare";dst.mkdir(exist_ok=True); sfx= f"_{a.variant}" if a.variant else ""
-    (dst / f"mesh_convergence_fea{sfx}.json").write_text(json.dumps(out, indent=1))
+    dst=cfg.compare_dir(run,"mesh"); sfx=f"_{a.variant}" if a.variant else ""
     lab = dict(Q)
     print("worst deviation from the finest level, per level: " + "; ".join(
         f"{L} {abs(dev[worst_k[L]][L]):.2f} {unit(worst_k[L])} ({lab[worst_k[L]]})" for L in levels[1:]))
@@ -581,7 +580,7 @@ def sens_mode(a,run):
                   f"{'  BEYOND TOLERANCE' if abs(ch[k]) >= limit(k) else ''}{ctx}")
         print(f"  VERDICT: {'RELEVANT: must be modelled / chosen with care' if relevant else 'not relevant for the deployed shape'} "
               f"(worst decisive change = {100 * out['variants'][t]['worst_share_of_tolerance']:.0f} % of its tolerance)")
-    dst = run / "compare"; dst.mkdir(exist_ok=True)
+    dst=cfg.compare_dir(run,"sens")
     (dst / f"sens_fea_{a.base}.json").write_text(json.dumps(out, indent=1))
     sens_figure(dst / f"sens_fea_{a.base}.png", a, out, Q)
 
@@ -687,7 +686,7 @@ def overview_mode(a,run):
                  seal_open_bins=d6[t].get("seal_angles_above_0p3mm"), seal_worst_gap_mm=d6[t].get("seal_worst_angle_gap_mm"),
                  penetration_mm=d6[t].get("max_penetration_mm"), ring_SD_after_mm=d6[t].get("ring_SD_after_mm"),
                  KE_IE_ramp_pct=runs[t]["qs"]["mean_ramp_pct"], quasi_static=runs[t]["qs"]["ok"]) for t in tags]
-    dst = run / "compare"; dst.mkdir(exist_ok=True)
+    dst=cfg.compare_dir(run,"sens")
     with open(dst / f"sens_overview_{a.base}.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
     (dst / f"sens_overview_{a.base}.json").write_text(json.dumps(dict(base=a.base, pattern=a.pattern, main_effects=me, runs=rows), indent=1))

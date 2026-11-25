@@ -35,6 +35,47 @@ OFFSET_SIGMA=0.8 #mm gaussian smoothing of the distance field
 
 # assumed constitutive laws for material property assignment
 E_MPA,NU,DENSITY=0.1, 0.49, 1.0e-9 # Neo-Hookean simple hyperelasticity with nearly incompressible biological tissue having bulk modulus much higher than the shear one
+ANNULUS_BAND_MM=5.0  # mm: tets whose centroid lies within this distance of the TV-annulus nodes = annular band (UQ input, assumption: no measured band width)
+ANNULUS_BAND=_MM=5.0 # mm: tets whose centroid lies within the distance of the TV annulus node= annular band (UQ input, assumption : no measured band width)
+#in reality due to TAPSE, there is longitudinal displacement of annulus.
+
+#---Uncertainty Quantification for wall material MODEL FORMS (UQ).Values as published; units MPa, mm.
+# Volumetric term: every source is (nearly) incompressible without a usable bulk value for our neo-Hookean-matrix forms -> D from nu = 0.49 on the
+# small-strain shear modulus mu0 of each form (same compressibility as the V&V): K = 2 mu0 (1 + nu) / (3 (1 - 2 nu)), D = 2 / K.
+NU_UQ=0.49
+
+def _D(mu0,nu=NU_UQ):
+    return 2.0/(2.0*mu0*(1+nu)/(3*(1-2*nu)))
+
+_A_NORD=0.200e-3 #Nordsletten 2021 to cite, a_e = 0.200 kPa (Fig. 4 caption, p. 450): W = a/2 (I1bar - 3) -> a = mu0, C10 = a / 2
+_C10_WANG= 0.0374e-3 * 15.3875       # Wang 2012 myocardium C10 * C01 (kPa -> MPa): small-strain match of the exponential matrix, mu0 = 2 C10
+_C_KOL,_AL_KOL=4.98e-3, 32.0       # Kolawole 2025 Guccione: c at alpha = 32, MEAN of the 6 personalised subjects of Table 3 (8.7, 2.3, 8.3, 2.4, 3.7, 4.5 kPa)
+_BF, _BT, _BFT = 0.55 * _AL_KOL, 0.25 * _AL_KOL, 0.20 * _AL_KOL   # fixed ratios r_f 0.55, r_t 0.25, r_ft 0.20 (p. 8) -> bf 17.6, bt 8.0, bft 6.4
+MATERIALS = {
+    "NH_nordsletten": dict(law="nh", C10=_A_NORD / 2, D=_D(_A_NORD),
+                           src="Nordsletten et al. 2021 Acta Biomater 135:441 (human ventricular myocardium, Sommer 2015 data): isochoric neo-Hookean "
+                               "baseline matrix a_e = 0.200 kPa (equilibrium/relaxed matrix of the viscoelastic model; anisotropy and stiffening are in "
+                               "the viscous part, not modelled -> soft lower bound); paper incompressible, D from nu 0.49"),
+    "HGO_wang": dict(law="hgo", C10=_C10_WANG, D=_D(2 * _C10_WANG), k1=6.0798e-3, k2=98.3666, kappa=0.144, theta_deg=6.78,
+                     src="Wang, Sirois, Sun 2012 J Biomech 45:1965, myocardium (human LV, 79 y, equibiaxial), kPa per Mao 2018; Abaqus HGO = neo-Hookean "
+                         "matrix C10 = C10_W * C01_W (small-strain match, matrix stiffening lost); fibres k1, k2, kappa (calibrated dispersion) as published; "
+                         "2 families +-6.78 deg about circumferential; D from nu 0.49 (Wang D 0.0005 1/kPa with the NH matrix: K/mu ~3500, Abaqus warns)"),
+    "FUNG_kolawole": dict(law="fung", c=_C_KOL, b1111=_BF, b2222=_BT, b3333=_BT, b1122=0.0, b1133=0.0, b2233=0.0,
+                          b1212=_BFT / 2, b1313=_BFT / 2, b2323=_BT / 2, D=_D(_C_KOL * _BFT / 2),
+                          src="Kolawole et al. 2025 Sci Rep 15:5556 (7 healthy humans, in vivo MRI + FE, LV): Guccione transversely isotropic "
+                              "psi = c/2 (e^Q - 1), Q = bf Eff^2 + bt (Ess^2 + Enn^2 + 2 Esn^2) + 2 bft (Efs^2 + Efn^2), alpha = 32, ratios 0.55/0.25/0.20; "
+                              "c = mean of the 6 personalised subjects (derived, Table 3); mapped EXACTLY to Abaqus FUNG-ORTHOTROPIC (Q = ... + 4 b1212 E12^2, "
+                              "verified): b1111 bf, b2222 = b3333 bt, b2323 bt/2, b1212 = b1313 bft/2, couplings 0; axis 1 = fibre = circumferential (our rule)"),
+    "FUNG_nemavhola_RV": dict(law="fung", c=2.826e-3, b1111=1.763, b2222=3.239, b3333=3.239, b1122=1.294, b1133=1.294, b2233=1.294,
+                              b1212=1.207 / 4, b1313=1.207 / 4, b2323=1.207 / 4, D=_D(2.826e-3 * 1.207 / 4),
+                              src="Nemavhola 2021 porcine RV biaxial (glutaraldehyde-treated, planar): 2D->3D assumptions (out-of-plane = cross-fibre, b5/b6 "
+                                  "dropped, E12 tensor reading b1212 = b4/4 to verify) -> ALTERNATIVE only"),
+}
+
+# ---- ParaView views made for every run by run_batch (15b_paraview_view.py, run with ParaView's own Python)
+PVPYTHON = Path(r"C:\Users\boiar\Downloads\ParaView-6.2.0-RC1-Windows-Python3.12-msvc2017-AMD64\ParaView-6.2.0-RC1-Windows-Python3.12-msvc2017-AMD64\bin\pvpython.exe")
+PV_FIELDS = ("S_maxP_kPa", "LE_maxP_pct", "SED_kPa", "VM_kPa", "CPRESS_kPa")   # fields of 13 shown (range = device-zone p99, CPRESS p95)
+PV_NORMAL = "y"                                                            # cut-away plane normal through the cuff centre (y: best SYN_0001 view)
 
 # Boundary conditions definition
 LID_DEPTH=4.6 # RULE: wall nodes within this depth under the vessel caps (patch 10/11/12) are fixed points during the simulation
@@ -96,8 +137,9 @@ ELEM_OUT_INTERVAL=10
 CLINICAL=dict(source="Penta et al. 2025, JACC Cardiovasc Interv 18:1492-4 (EVOQUE, CT n = 16)", oversizing_mean_pct=8.5, oversizing_range_pct=(3.0,14.0),frame_node3_perimeter_mm=147.9, annulus_pre_perimeter_mm=149.7)
 
 #ordered study outputs runs/<id>/compare/<subfolder>
-COMPARE_DIRS = {"mesh": "01_mesh_convergence", "qc": "02_mesh_qc", "sens": "03_sensitivity", "uq": "04_uq",
-                "deliverable": "05_direct_vs_mapped", "device": "06_device_trials"}
+COMPARE_DIRS = {"mesh": "01_mesh_convergence", "qc": "02_mesh_qc", "sens": "03_sensitivity",
+                "deliverable": "05_direct_vs_mapped", "device": "06_device_trials","uqin":"07_uq_inputs","landing":"08_landing_depth",
+                "crimp":"09_crimp_test","figures":"10_figures"}
 
 def compare_dir(run,kind):
     """runs/<id>/compare/<ordered subfolder of this kind of study> (created if missing)"""

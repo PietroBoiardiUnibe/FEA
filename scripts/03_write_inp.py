@@ -18,6 +18,7 @@ import vtk
 from scipy.spatial import cKDTree
 from vtkmodules.util.numpy_support import vtk_to_numpy
 import fea_config as cfg
+import fea_common as fc
 
 EXP_NODE0,EXP_ELEM0=2_000_000, 5_000_000 # expander ids: nodes from 2,000,001, quads from 5,000,001 , masses from 5,100,001
 SPR_NODE0,SPR_ELEM0=3_000_000,6_000_000 #ground nodes and spring elements of the graded normal only support to dampen far field deformation
@@ -101,6 +102,39 @@ def outer_support(X,T,T10,outer):
             area[m] = area.get(m, 0.0) + A / 3.0; nrm[m] = nrm.get(m, 0.0) + n * A / 3.0
     ids=np.array(sorted(area));A=np.array([area[i] for i in ids]); N=np.array([nrm[i] for i in ids])
     return ids, A, N / np.linalg.norm(N, axis=1, keepdims=True)
+
+def neo_hooke(E,nu):
+    """C10, D1 of the nearly-incompressible neo-Hookean formulation for hyperelasticity from Young's modulus E and Poisson's ratio nu;
+    (small-strain equivalence: mu = 2 C10, K = 2 / D1).
+    Same nu for every E -> pure stiffness scaling: K / mu stays constant (biological incompressibility not probed)"""
+    mu=E/(2*(1+nu)); K=E/(3*(1-2*nu))
+    return mu/2.0, 2.0/K
+
+def dilatational(law):
+    """Dilatational modulus M= K +4/3 mu at zero strain (sets the stable explicit increment ~ h sqrt(rho / M))"""
+    mu = law["c"] * law["b1212"] if law["law"] == "fung" else 2.0 * law["C10"]
+    return 2.0/law["D"] + 4.0/3.0*mu
+
+def fibre_frames(X,T,pd,centre, axis):
+    """Local material axes of every tet  (rule-based, NO transmural variation: ~1.7 element layers across the wall):
+    1 = CIRCUMFERENTIAL about the TV-annulus (cuff) axis, projected on the wall tangent plane; 2 = in-plane longitudinal; 3 = wall normal.
+    Support: RA vestibule fibres circumferential to the tricuspid orifice, no transmural variation in the atria (Feng et al. 2024, rule-based
+    atrial fibres); Wang 2012 fibre families at +-theta about the circumferential direction. Wall normal = nearest inner-surface vertex normal """
+    el,loc=boundary_faces(T,pd["surface"]==1)
+    nv=np.zeros((len(X),3))
+    for e, f in zip(el, loc):
+        a, b, c = (T[e, i] for i in FACES[f - 1]); d = T[e, ({0, 1, 2, 3} - set(FACES[f - 1])).pop()]
+        n = np.cross(X[b] - X[a], X[c] - X[a]); n *= np.sign(np.dot(n, X[a] - X[d]))          # away from the tet = into the cavity
+        nv[[a, b, c]] += n
+    inner = np.flatnonzero(np.linalg.norm(nv, axis=1) > 0); nv[inner] /= np.linalg.norm(nv[inner], axis=1)[:, None]
+    cen = X[T].mean(1); n = nv[inner][cKDTree(X[inner]).query(cen)[1]]
+    ephi = np.cross(axis, cen - centre)
+    t1 = ephi - np.einsum("ij,ij->i", ephi, n)[:, None] * n
+    bad = np.linalg.norm(t1, axis=1) < 1e-6 * np.linalg.norm(ephi, axis=1).max()              # normal along the circumferential direction
+    t1[bad] = np.cross(n[bad], axis)
+    t1 /= np.linalg.norm(t1, axis=1)[:, None]; t2 = np.cross(n, t1)
+    return t1, t2, int(bad.sum())
+
 
 def grade(d,d_on,ramp):
     """Smooth step 0->1 of the distance d from the TV ring: no support within d_on, full support beyond d_on + ramp """
@@ -193,8 +227,12 @@ def main():
     ap.add_argument("--contact", default=cfg.CUFF_WALL_CONTACT,choices=("bonded","hard"), help="cuff-wall contact: bonded (no separation + rough) or hard (separation allowed, Coulomb --friction); anchors: always hard")
     ap.add_argument("--penalty", type=float, default=1.0, help="scale factor of the default general-contact penalty stiffness (sensitivity: 0.1 / 10)")
     ap.add_argument("--device_dir",default="device",help="cuff-only runs: runs/<id>/<device_dir>/expander.vtp (e.g. device_mec)")
+    ap.add_argument("--E", type=float, default=cfg.E_MPA, help="wall Young's modulus (MPa), neo-Hookean; nu stays cfg.NU (UQ: pure stiffness scaling)")
+    ap.add_argument("--mat",default="",choices=[""]+list(getattr(cfg,"MATERIALS",{})),help="UQ wall model form from cfg.MATERIALS (default: placeholder NH --E)")
+    ap.add_argument("--band_E", type=float, default=0.0, help="annular band: neo-Hookean E (MPa) of the tets within cfg.ANNULUS_BAND_MM of the TV annulus (0 = no band)") # for stiffer fibro-muscular mimicking of material properties in TV annular region
     a=ap.parse_args()
     assert a.penalty>0, "penalty scale factor must be > 0"
+    assert a.E>0 and a.band_E>=0, "moduli must be positive"
     assert a.friction>=0, "friction coefficient must be >=0 (it applies to every non-bonded contact: anchors always, skirt-wall only when --contact hard)"
     
     run=cfg.RUNS/a.id
@@ -221,12 +259,34 @@ def main():
     E,Q,U=read_expander(device)
     print(f"expander: {len(E):,} nodes, {len(Q):,} quads, radial move {np.linalg.norm(U, axis=1).min():.2f}..{np.linalg.norm(U, axis=1).max():.2f} mm")
 
-    #material as neo Hookean simple hyperelasticity (no HGO, Ogden or Mooney Rivlin)
-    mu=cfg.E_MPA/(2*(1+cfg.NU)) #shear modulus
-    K=cfg.E_MPA/(3*(1-2*cfg.NU)) #bulk modulus resistance to compression
-    C10,D1=mu/2.0,2.0/K
-    print(f"neo-Hookean material properties and coefficients: mu {mu:.4f} MPa, K {K:.3f} MPa, C10 {C10:.4e}, D1 {D1:.4e}")
-
+    # material: UQ model form is input uncertainty together with boundary conditions; from cfg.MATERIALS (--mat)
+    if a.mat:
+        mat=dict(cfg.MATERIALS[a.mat],name=a.mat)
+    else:
+        C10p,D1p=neo_hooke(a.E,cfg.NU);mat=dict(law="nh",C10=C10p,D=D1p,name="placeholder",src="V&V placeholder neo-Hookean (E, nu)")
+    band=np.zeros(len(T), bool); bmat=None
+    if a.band_E>0:
+        assert mat["law"] == "nh", "the annular band is defined for the neo-Hookean forms only"
+        band=cKDTree(X[pd["tv_annulus"]==1]).query(X[T].mean(1))[0]<cfg.ANNULUS_BAND_MM
+        C10b, D1b = neo_hooke(a.band_E, cfg.NU); bmat = dict(law="nh", C10=C10b, D=D1b, E_MPa=a.band_E)
+    if mat["law"] in ("hgo","fung"):  #material axes of the anisotropic forms about the skirt-only (cuff) axis of the device record
+        pl=json.loads((cfg.PLANS/ f"{a.id}_plan.json").read_text()); fr=fc.axis_plan(pl,dev_rec.get("axis_offset_e1e2_mm"))["frame"]
+        t1,t2,n_bad=fibre_frames(X,T,pd,np.array(fr["centre"]),np.array(fr["normal"]))
+    C10,D1=mat.get("C10"),mat["D"]
+    M_ref = cfg.E_MPA / (3 * (1 - 2 * cfg.NU)) + 4.0 / 3.0 * cfg.E_MPA / (2 * (1 + cfg.NU))      # dilatational modulus of the V&V base
+    M=max(dilatational(mat),dilatational(bmat) if bmat else 0.0)
+    # TIME SCALING (UQ model forms only): the quasi-static hyperelastic answer is rate-independent, but the ratio inertia / stiffness is not.
+    # For a wall softer than the V&V placeholder the ramp and hold are stretched by s = sqrt(M_ref / M) (same dimensionless time as the verified
+    # ramp 0.2 s: KE/IE ~ (rho v^2) / (M eps^2) unchanged); the mass-scaling target follows the wave speed with a safety cap x3
+    # (x13 diverged at increment 20; the deforming wall tets bring the increment to ~1.2e-5 anyway); a stiffer wall gets the smaller target.
+    s_t=max(1.0,float(np.sqrt(M_ref/M))) if a.mat else 1.0
+    ramp,hold=a.ramp*s_t, cfg.T_HOLD *s_t
+    dt=cfg.DT_TARGET*min(float(np.sqrt(M_ref/M)),3.0) if a.mat else cfg.DT_TARGET*min(1.0,np.sqrt(M_ref/M))
+    print(f"wall material '{mat['name']}' ({mat['law']}): dilatational modulus {M:.3g} MPa (V&V base {M_ref:.3g}) -> mass-scaling target {dt:.3g} s, "
+          f"ramp {ramp:.3g} s + hold {hold:.3g} s (time scale x{s_t:.2f})"
+          + (f"; annular band {int(band.sum()):,} tets, C10 {bmat['C10']:.4g}, D {bmat['D']:.4g}" if band.any() else "")
+          + (f"; material axes: {n_bad} tets with the normal along the circumferential direction (fallback)" if mat["law"] in ("hgo", "fung") else ""))
+    
     #model data
     w=[f"*HEADING\n{name}: device deployment (FEA repo {git_hash(cfg.SCRIPTS)}). mm, tonne, s, N, MPa.",
          "*PREPRINT, ECHO=NO, MODEL=NO, HISTORY=NO, CONTACT=NO"]
@@ -249,8 +309,33 @@ def main():
         w+=blocks
         print(f"compliant anchors: {len(root_bc)} B31 beams + rigid balls, E_eff {cfg.ANCHOR_E_EFF:g} MPa, alpha {cfg.ANCHOR_ALPHA:g}/s, {n_anc:,} nodes")
 
-    w += ["*MATERIAL, NAME=TISSUE", "*DENSITY", f"{cfg.DENSITY:g},", "*HYPERELASTIC, NEO HOOKE", f"{C10:.6e}, {D1:.6e}"]
-    w += ["*SOLID SECTION, ELSET=WALL, MATERIAL=TISSUE"]
+    def material_lines(name,m):
+        w_=[f"*MATERIAL, NAME={name}","*DENSITY",f"{cfg.DENSITY:g},"]
+        if m["law"]=="nh":
+            w_+=["*HYPERELASTIC, NEO HOOKE", f"{m['C10']:.6e}, {m['D']:.6e}"]
+        elif m["law"]=="hgo":
+            w_+=["*ANISOTROPIC HYPERELASTIC, DEFINITION=HOLZAPFEL-GASSER-OGDEN, LOCAL DIRECTIONS=2",f"{m['C10']:.6e}, {m['D']:.6e}, {m['k1']:.6e}, {m['k2']:.6g}, {m['kappa']:.6g}"]
+        else:
+            w_+=["*ANISOTROPIC HYPERELASTIC, DEFINITION=FUNG-ORTHOTROPIC",", ".join(f"{m[k]:.6g}" for k in ("b1111", "b1122", "b2222", "b1133", "b2233", "b3333", "b1212", "b1313")) + ",",
+                   f"{m['b2323']:.6g}, {m['c']:.6e}, {m['D']:.6e}"]
+        return w_
+    w+=material_lines("TISSUE",mat)
+    if mat["law"] in ("hgo","fung"):# element-wise local axes (1 circumferential, 2 longitudinal) + the fibre directions in those axes
+        w += ["*DISTRIBUTION TABLE, NAME=ORITAB", "COORD3D, COORD3D", "*DISTRIBUTION, TABLE=ORITAB, LOCATION=ELEMENT, NAME=ORIDIST",
+              ", 1., 0., 0., 0., 1., 0."] + [f"{i + 1}, {p[0]:.6f}, {p[1]:.6f}, {p[2]:.6f}, {q[0]:.6f}, {q[1]:.6f}, {q[2]:.6f}" for i, (p, q) in enumerate(zip(t1, t2))]
+        if mat["law"]=="hgo":
+            th=np.radians(mat["theta_deg"])
+            w += ["*ORIENTATION, NAME=ORI, LOCAL DIRECTIONS=2", "ORIDIST", "3, 0.", f"{np.cos(th):.8f}, {np.sin(th):.8f}, 0.", f"{np.cos(th):.8f}, {-np.sin(th):.8f}, 0."]
+        else:
+            w+=["*ORIENTATION, NAME=ORI","ORIDIST","3,0."]
+        w += ["*SOLID SECTION, ELSET=WALL, MATERIAL=TISSUE, ORIENTATION=ORI"]
+    elif band.any():
+        w+=["*ELSET,ELSET=ANNULUS_BAND",lines(np.flatnonzero(band)+1),"*ELSET, ELSET=WALL_REST",lines(np.flatnonzero(~band)+1)]
+        w+=material_lines("ANNULUS",bmat)
+        w += ["*SOLID SECTION, ELSET=WALL_REST, MATERIAL=TISSUE", "*SOLID SECTION, ELSET=ANNULUS_BAND, MATERIAL=ANNULUS"]
+    else:
+        w += ["*SOLID SECTION, ELSET=WALL, MATERIAL=TISSUE"]
+
     #graded outer support
     n_spr,k_tot=0,0.0
 
@@ -268,16 +353,16 @@ def main():
     assert n_total<cfg.MAX_NODES, "above the license node cap: must use a coarser mesh level, remove unnecessary refinement"
 
     #amplitude, contact property , fixed vessel lids as constraints
-    w+=["*AMPLITUDE, NAME=RAMP,DEFINITION=SMOOTH STEP",f"0.,0.,{a.ramp:g}, 1."]
+    w+=["*AMPLITUDE, NAME=RAMP,DEFINITION=SMOOTH STEP",f"0.,0.,{ramp:g}, 1."]
     w+=["*SURFACE INTERACTION, NAME=CPROP","*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=HARD"]+([f"*FRICTION\n{a.friction:g}"] if a.friction > 0 else [])
     if a.contact=="bonded": #cuff wall: no lift off once touched and no slip (explicit general contact accepts NO SEPARATION only with ROUGH)
         w+=["*SURFACE INTERACTION, NAME=CPROP_BOND","*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=HARD, NO SEPARATION","*FRICTION, ROUGH"]
     w+=["*BOUNDARY","LIDS,ENCASTRE"]
 
     #history data: the step
-    t_total=a.ramp + cfg.T_HOLD
+    t_total=ramp + hold
     w+=["*STEP, NAME=DEPLOY", "*DYNAMIC, EXPLICIT", f", {t_total:g}",
-          f"*FIXED MASS SCALING, DT={cfg.DT_TARGET:g}, TYPE=BELOW MIN", "*BOUNDARY, AMPLITUDE=RAMP"]
+          f"*FIXED MASS SCALING,DT={dt:g},TYPE=BELOW MIN", "*BOUNDARY, AMPLITUDE=RAMP"]
     w+=["\n".join(f"{EXP_NODE0+i+1}, {d+1}, {d+1}, {U[i,d]:.6f}" for i in range(len(E)) for d in range(3))]
     if root_bc: #anchor roots : radial translation back to the deployed position (same ramp), rotations held at 0
         w+=["\n".join(f"{nr}, {d+1}, {d+1}, {u[d]:.6f}" for nr,u in root_bc for d in range(3))]
@@ -297,8 +382,8 @@ def main():
     info = {"id": a.id, "level": a.level, "name": name, "fea_repo": git_hash(cfg.SCRIPTS), "shape_repo": git_hash(cfg.SHAPE_SCRIPTS),
             "n_corner_nodes": len(X), "n_nodes": len(X10), "n_tets": len(T), "n_lid_nodes": int(lid.sum()), "n_expander_nodes": len(E),
             "n_springs": n_spr, "support": {"mode": cfg.SUPPORT_MODE, "k_area": cfg.SUPPORT_K, "d_on": cfg.SUPPORT_D_ON, "ramp": cfg.SUPPORT_RAMP, "total_N_per_mm": k_tot},
-            "material": {"model": "neo-Hookean", "E_MPa": cfg.E_MPA, "nu": cfg.NU, "C10": C10, "D1": D1, "assumed": True},
-            "time": {"ramp_s": a.ramp, "hold_s": cfg.T_HOLD, "dt_target_s": cfg.DT_TARGET}, "friction": a.friction,"penalty_scale":a.penalty,"element_output":{"keys":"ESEDEN,EVOL,S,LE","interval":cfg.ELEM_OUT_INTERVAL},"tag":a.tag, "expander_node0": EXP_NODE0,
+            "material": {"model": mat["law"], "name": mat["name"], "params": {k: v for k, v in mat.items() if k not in ("law", "name")}, "E_MPa": None if a.mat else a.E, "nu": None if a.mat else cfg.NU, "C10": C10, "D1": D1, "assumed": True, "annulus_band": dict(bmat, band_mm=cfg.ANNULUS_BAND_MM, n_tets=int(band.sum())) if band.any() else None},
+            "time": {"ramp_s": ramp, "hold_s": hold, "dt_target_s": dt,"time_scale":s_t}, "friction": a.friction,"penalty_scale":a.penalty,"element_output":{"keys":"ESEDEN,EVOL,S,LE","interval":cfg.ELEM_OUT_INTERVAL},"tag":a.tag, "expander_node0": EXP_NODE0,
             "device":str(device),"anchors":str(anchors or ""), "cuff_wall_contact": a.contact,"axis_rule":dev_rec.get("axis_rule","mec"),"axis_offset_e1e2_mm":dev_rec.get("axis_offset_e1e2_mm",[0.0,0.0]),
             "n_device_nodes":len(E)+n_anc,
             "anchor_model":{"E_eff_MPa":cfg.ANCHOR_E_EFF,"nu":cfg.ANCHOR_NU,"alpha":cfg.ANCHOR_ALPHA,"density":cfg.NITI_DENSITY} if anchors else None}

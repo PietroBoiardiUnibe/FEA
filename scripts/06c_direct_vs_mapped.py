@@ -149,7 +149,7 @@ def main():
     for L in levels:
         row, plot=one_level(a,run,L,plan_raw); rows.append(row); plots[L]=plot
         print(f"{L}: wrote post/{a.id}_{L}_{a.tag}_deployed_fea_wall.vtu + _deployed_fea_inner.vtp")
-    mc = run / "compare" / f"mesh_convergence_fea_{a.tag}.json"
+    mc=cfg.compare_dir(run,"mesh")/f"mesh_convergence_fea_{a.tag}.json"
     U = json.loads(mc.read_text())["gci_fine_triplet"]["cavity_change_ml"]["uncertainty_pct"] if mc.exists() else float("nan")
     print(f"{a.id} {a.tag}: DIRECT (FEA inner surface) vs MAPPED (SSM vertices, 06) after deployment; device zone = < {cfg.ZONE_MM:g} mm from the TV annulus")
     print(f"{'':5s} {'vertices':>8s} | {'mapped->direct (mm)':>27s} | {'direct->mapped (mm)':>27s} | {'cavity change (ml)':>25s} | {'inside cuff (mm)':>17s} | {'edge in zone':>12s}")
@@ -161,7 +161,7 @@ def main():
               f"{d['mean']:5.3f} {d['p95']:5.3f} {d['max']:5.2f} {d['zone_p95']:6.3f} {d['zone_max']:4.2f} | {cv['direct']:7.3f} {cv['mapped']:7.3f} {cv['diff_pct']:+7.2f} | "
               f"{ic['direct']:7.2f} {ic['mapped']:7.2f} | {e['zone_median']:6.2f} {e['zone_p95']:5.2f}")
     print(f"reference: mesh uncertainty of the cavity change at {levels[0]} U = {U:.2f} %; seal-gap criterion {SEAL_MM:g} mm; SSM surface {rows[0]['ssm_vertices']:,} vertices")
-    out = Path(a.out) if a.out else run / "compare"; out.mkdir(exist_ok=True)
+    out=Path(a.out) if a.out else cfg.compare_dir(run,"deliverable"); out.mkdir(exist_ok=True)
     (out / f"direct_vs_mapped_{a.tag}.json").write_text(json.dumps(dict(id=a.id, tag=a.tag, cavity_U_pct=U, levels=rows), indent=1))
     figure(out / f"direct_vs_mapped_{a.tag}.png", a, rows, plots, U, a.show if a.show in plots else levels[0])
     print("wrote", out / f"direct_vs_mapped_{a.tag}.json", "and .png")

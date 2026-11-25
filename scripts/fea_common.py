@@ -3,7 +3,7 @@ Tiny helpers shared by several pipeline scripts (one implementation, one place).
 The cuff axis: every placement (02,02b) and every measurement about the device (06 ring and seal line, 07 checks, 10 QoIs),
 uses the same AXIS stored once in the device record (device.json/device_full.json) and copied by 03 into the run's info file (axis_rule, axis_offset_e1e2_mm).
 """
-
+import re
 import numpy as np
 
 def contour_centre(plan,rule):
@@ -85,3 +85,18 @@ def annulus_sizing(P0,P1,plan,d_device,nsec=24):
                 d_device_mm=float(d_device), sectors=len(used), theta=np.array([np.median(ang[sec == s]) for s in used]),
                 r0=np.hypot(R0[:, 0], R0[:, 1]), r1=r1, sd_r_after=float(r1.std()), mean_r_after=float(r1.mean()))
 
+def solver_log(dep,name):
+    """Fixed mass scaling as Abaqus applied it (.sta table): added mass (% of the model mass; scaled once at the step start, constant), stable
+    increment at the start and its minimum (it falls below the target when elements shrink: smaller increments, NO extra mass), increments."""
+    rows=[l.split() for l in (dep / f"{name}.sta").read_text(errors="ignore").splitlines() if re.match(r"\s+\d+\s+\d\.\d+E[+-]\d+\s+\d\.\d+E[+-]\d+\s+\d\d:\d\d:\d\d", l)]
+    return dict(added_mass_pct=float(rows[-1][-1]), dt_start_s=float(rows[0][4]),t_min_s=min(float(r[4]) for r in rows), increments=int(rows[-1][0]))
+
+def mesh_U(s10,f,N):
+    """U(L1) in QoI units from the L1-L2-L3 triplet script 10's gci3: GCI if converging, spread band otherwise)."""
+    spread=1.25*max(abs(f[1]-f[0],f[2]-f[0]))
+    if abs(f[0]<1e-9):
+        return spread, "spread band (finest value 0)"
+    g=s10.gci3(f,N)
+    if g["type"]=="converged" and spread>0:
+        return spread, "spread band (one step zero)"
+    return g["uncertainty_pct"]/100*abs(f[0]), f"{g['method']}, {g['type']} R {g['R']:.2f}"

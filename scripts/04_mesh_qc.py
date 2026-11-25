@@ -185,7 +185,7 @@ def main():
                 m = tet_metrics(X + res["U"][f].astype(float)[idx], T); m["J"] = m["V"] / m0["V"]
                 rows.append(dict(level=L, state=st, **sz, **summary(m, m0["V"]), **({"abaqus_distorted": d_ab, "mass_change_pct": mass} if st == "end" else {})))
                 metrics_by[(L, st)] = m
-    out=Path(a.out) if a.out else (run / ("compare" if a.tag else "mesh")); out.mkdir(exist_ok=True)
+    out=Path(a.out) if a.out else (cfg.compare_dir(run,"qc") if a.tag else run/"mesh"); out.mkdir(exist_ok=True)
     stem=f"mesh_qc_{a.tag}" if a.tag else "mesh_qc"
     keys=list(dict.fromkeys(k for r in rows for k in r))
     with open(out / f"{stem}.csv", "w", newline="") as fh:
