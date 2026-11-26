@@ -89,12 +89,12 @@ def solver_log(dep,name):
     """Fixed mass scaling as Abaqus applied it (.sta table): added mass (% of the model mass; scaled once at the step start, constant), stable
     increment at the start and its minimum (it falls below the target when elements shrink: smaller increments, NO extra mass), increments."""
     rows=[l.split() for l in (dep / f"{name}.sta").read_text(errors="ignore").splitlines() if re.match(r"\s+\d+\s+\d\.\d+E[+-]\d+\s+\d\.\d+E[+-]\d+\s+\d\d:\d\d:\d\d", l)]
-    return dict(added_mass_pct=float(rows[-1][-1]), dt_start_s=float(rows[0][4]),t_min_s=min(float(r[4]) for r in rows), increments=int(rows[-1][0]))
+    return dict(added_mass_pct=float(rows[-1][-1]), dt_start_s=float(rows[0][4]),dt_min_s=min(float(r[4]) for r in rows), increments=int(rows[-1][0]))
 
 def mesh_U(s10,f,N):
     """U(L1) in QoI units from the L1-L2-L3 triplet script 10's gci3: GCI if converging, spread band otherwise)."""
-    spread=1.25*max(abs(f[1]-f[0],f[2]-f[0]))
-    if abs(f[0]<1e-9):
+    spread=1.25*max(abs(f[1]-f[0]),abs(f[2]-f[0]))
+    if abs(f[0])<1e-9:
         return spread, "spread band (finest value 0)"
     g=s10.gci3(f,N)
     if g["type"]=="converged" and spread>0:
