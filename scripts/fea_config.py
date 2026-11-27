@@ -125,11 +125,48 @@ ANCHOR_E_EFF=319.8 # MPa : circular section r 1.2 s with the bending stiffness E
 ANCHOR_NU=0.33 #Nitinol Poisson Ratio (far from incompressibility)
 NITI_DENSITY=6.45e-9 # t/mm3 (6.45 g/cm3)
 ANCHOR_ALPHA=50.0 # 1/s mass-proportional damping (NUMERICAL: zeta ~10 % at the ~40 Hz mass-scaled cantilever mode; dissipates 2e-4 of the external work)
-CUFF_WALL_CONTACT="hard" # FROZEN 2026-11-18 (hard mu 0: lift-off allowed, no crushed tet); "bonded"= hard + NO SEPARATION + ROUGH (Explicit general contact demands ROUGH with No Separation) | "hard" = hard + separation allowed (+ Coulomb --friction)
+CUFF_WALL_CONTACT="hard" #(hard mu 0: lift-off allowed, no crushed tet); "bonded"= hard + NO SEPARATION + ROUGH (Explicit general contact demands ROUGH with No Separation) | "hard" = hard + separation allowed (+ Coulomb --friction)
 AXIS_RULE="centroid" # cuff axis through the centroid of the area enclosed by the TV annulus contour | "perimeter" | "mec" (07b centre)
 # mimics clinical practice as in CT based pre-procedural planning of delivery and landing of the transcatheter device
 assert CUFF_WALL_CONTACT in ("bonded","hard") and LANDING_CLEARANCE>=0, "full-device settings are out of range"
 assert AXIS_RULE in ("centroid","perimeter","mec"), "unknown axis deployment rule"
+
+# Force-controlled BC (crimping and self expansion) for better clinical plausibility and more realistic outcome for the domain to hand to CFD/FSI
+# plate crimp + superelastic expansion with under expansion, SOLID frame
+# Boxwell et al. 2026 CMPB 282:109404 (nitinol Table 2, 12 rigid plates, C3D8R struts, damping, mass-scaling target, energy gates),
+# Bressloff et al. 2022 CVET 13:735 (PET skirt as S4R shell, 0.1 s crimp). Everything not listed here is inherited from the frozen stage 0.
+DEVICES=FEA/"inputs"/"devices"  # one folder per device package (heart independent): pattern, hex frame, skirt + skin, anchors, QC, VTK views
+DEVICE="replica_44"  # ACTIVE device: replica_44 (appearance-model generator, 02c) | evoque_48_ct (microCT reconstruction, 02e, later)
+NITI_SE=dict(E_A=54440.0,nu_A=0.3,E_M=26910.0,nu_M=0.3,eps_L=0.047,sL_S=350.0,sL_E=375.0,sU_S=152.0,sU_E=120.0,sCL_S=520.0,epsV_L=0.047,
+             T0=37.0,dsdT_L=6.527, dsdT_U=6.527)# MPa; Boxwell Table 2 (E_A > E_M: stable in Explicit)
+  # analysis at T = T0 = 37 C -> the dsig/dT terms have no effect (stated)
+NITI_ALPHA=35.0  # 1/s mass-proportional frame damping (Boxwell); divided by the wall-law time scale s (similarity)
+PET=dict(E=50.0,nu=0.3,t=0.06, density=1.38e-9) # Bressloff 2022: PET skirt, linear elastic S4R shell, no damping, assumed simplification
+SKIRT_H=0.5 #mm skirt S4R element size (shell) structured grid on the grid surface (swept), skirt attahced to outer frame inner surfaces
+HEX_H=0.26#mm in plan quad size of the strut pattern (~3 elements across a 0.70 mm strut = in-plane crimp bending)
+HEX_NL = 3                 # hex layers through the thickness: 3
+HEX_JUNCTION_R=0.55 #mm junction disk radius in the struct chart (generator NODE_R)
+HEX_SJ_MIN=0.02  # hexes with a corner scaled Jacobian <= this are DROPPED (degenerate junction slivers; count reported in the QC)
+PLATES_N=12 #rigid R3D4 crimp plates as in paper referenced
+PLATE_GAP=0.15 #mm start gap before ramp of crimp phase
+PLATE_FACET=2.0 #mm plate facet size(a flat rigid plate is exact at any size)
+PLATE_NODE_MASS=1.0e-6  #t: point mass + rotary inertia of each plate reference node (prescribed motion: value irrelevant, must be > 0 for hard penalisation based contact upon crimping)
+CRIMP_LAMBDA_MAX=0.60  # RULE: radial crimp ratio (plates r -> lam r), calibrated per DEVICE (crimp is heart independent)
+CRIMP_CLEAR=0.5 # mm: per HEART the crimped room skin must start >= this inside the wall + final anchors 
+OPEN_LAMBDA=1.06  #plates re-open to this x their start radius (they leave the frame: purely force-controlled expansion)
+T_CRIMP=0.1   # s: plate crimp duration at time scale 1 (Bressloff 0.1 s; Boxwell 0.3 s = s1 check run)
+DT_FRAME=2.0e-6 #s frame and skirt VARIABLE mass scaling target  at time scale 1 (Boxwell's coarsest tested; effective dt ~1.67e-6 set by the wall crushed element cells during deployment at annular region, L min driving FEA)
+MS_FREQUENCY=1000  # increments between mass-scaling updates (Boxwell's semi-automatic scheme)
+SKIN_NODE_MASS=1.0e-9 # t (1 mg) per room-skin node: the skin follows the struts by *EQUATION
+SELF_CONTACT_EXCL=1.2 #mm frame elements this close to tied seams / junction circles are excluded from self contact (overlap by construction)
+FRAME_AE_GATE_PCT = (10.0, 15.0)  # frame ALLAE/IE at crimp end: <= 10 PASS, 10-15 FLAG, > 15 FAIL; plus: no AE growth in release + hold
+
+FORCEBC_IDS=dict(F=7_000_000, S=8_000_000, K=8_200_000, C=8_300_000,M=8_400_000,RP=8_600_001)# node/element label offsets of the device
+                           # (frame up to 1 M nodes: 3 layers = 125.5k; the 03 V&V model ends at ~6.01 M; 03c asserts no overlap)
+assert NITI_SE["E_A"] > NITI_SE["E_M"] > 0 and 0 < NITI_SE["eps_L"] < 0.1, "nitinol parameters out of range (E_A < E_M is unstable in Explicit)"
+assert 0.3 < CRIMP_LAMBDA_MAX < 1 < OPEN_LAMBDA and 0 < T_CRIMP and 0 < DT_FRAME < 1e-4, "crimp settings out of range"
+assert HEX_NL in (2, 3) and 0.15 <= HEX_H <= 0.35 and 0 < HEX_SJ_MIN < 0.2, "hex frame mesh settings out of range"
+
 
 # wall element output written by the 03 script also accounts ESEDEN, EVOL, S, LE, so strain and stresses): number interval of its own field request; 10= every 3rd displacement frame (30/10)
 ELEM_OUT_INTERVAL=10

@@ -1,6 +1,6 @@
 """
 The deployed thick wall for the computational mesh domain (IBAMR or other CFD/FSI solvers); the FEA displacement of the coarse
-FEA wall is carrie donto every node of the official 07a wall (cfg.WALLS/<id>_wall.vtu: inner surface = all SSM vertices, 4 mm grown outward)
+FEA wall is carried onto every node of the official 07a wall (cfg.WALLS/<id>_wall.vtu: inner surface = all SSM vertices, 4 mm grown outward)
 with IDENTICAL connectivity.
 
 Mapping   each fine node -> the coarse FEA tet that contains it (barycentric weights; nodes just outside every tet, e.g. on the decimated inner
